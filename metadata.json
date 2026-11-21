@@ -1,0 +1,6 @@
+{
+  "name": "ClipPulse",
+  "description": "AI viral video clip studio for YouTube links with subtitles, custom text overlays, music, transitions, multi-aspect export, and social captions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

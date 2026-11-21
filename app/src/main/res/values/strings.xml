@@ -1,0 +1,32 @@
+<resources>
+    <string name="app_name">ClipPulse</string>
+    <string name="tab_create">Create</string>
+    <string name="tab_projects">Projects</string>
+    <string name="tab_captions">Captions</string>
+    <string name="hero_title">Viral Clip Studio</string>
+    <string name="hero_subtitle">Paste a YouTube link to capture viral moments with auto-captions, TTS voiceover, effects &amp; social hooks.</string>
+    <string name="youtube_url_hint">Paste YouTube link (watch, shorts, youtu.be)…</string>
+    <string name="action_extract_clips">Extract Viral Clips</string>
+    <string name="action_import_local">Add Local Video</string>
+    <string name="action_export">Export</string>
+    <string name="action_share">Share</string>
+    <string name="action_copy">Copy</string>
+    <string name="cd_back">Navigate back</string>
+    <string name="cd_play_pause">Play or pause preview</string>
+    <string name="cd_hero_art">ClipPulse studio banner</string>
+    <string name="cd_empty_projects">No saved projects illustration</string>
+    <string name="cd_paste_link">Paste from clipboard</string>
+    <string name="cd_clear_link">Clear link</string>
+    <string name="cd_delete_item">Delete item</string>
+    <string name="cd_add_clip">Add another clip</string>
+    <string name="export_modal_title_rendering">Processing &amp; Rendering</string>
+    <string name="export_modal_title_complete">MP4 Export Ready!</string>
+    <string name="export_modal_title_error">Export Failed</string>
+    <string name="export_modal_keep_open_hint">Please keep ClipPulse open while encoding finishes.</string>
+    <string name="action_cancel_export">Cancel Export</string>
+    <string name="cd_export_complete">Export completed</string>
+    <string name="cd_export_failed">Export failed</string>
+    <string name="action_open_gallery">Open in Phone Gallery</string>
+    <string name="label_quick_share_apps">Quick Share (Caption Auto-Copied)</string>
+    <string name="gallery_saved_badge">Auto-saved to Phone Gallery · Movies/ClipPulse</string>
+</resources>
