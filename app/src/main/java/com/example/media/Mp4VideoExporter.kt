@@ -17,9 +17,11 @@ import android.util.Log
 import androidx.core.content.FileProvider
 import com.example.model.ClipProject
 import com.example.model.ClipSourceType
-import com.example.model.ExportQuality
+import com.example.model.ExportResolution
 import com.example.model.MusicTrackPreset
 import com.example.model.TimelineClipItem
+import com.example.model.TransitionPreset
+import com.example.model.resolveExportBitrateMbps
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
@@ -72,19 +74,9 @@ class Mp4VideoExporter(
         onProgress: (ExportProgressUpdate) -> Unit
     ): ExportResult = withContext(Dispatchers.IO) {
         val ratio = project.aspectRatio
-        val width = if (project.exportQuality == ExportQuality.FULL_HD_1080P) {
-            ratio.exportWidth1080
-        } else {
-            ratio.exportWidth720
-        }.let { it - (it % 16) }.coerceAtLeast(320)
-
-        val height = if (project.exportQuality == ExportQuality.FULL_HD_1080P) {
-            ratio.exportHeight1080
-        } else {
-            ratio.exportHeight720
-        }.let { it - (it % 16) }.coerceAtLeast(320)
-
-        val fps = 15
+        val (width, height) = project.resolvedExportDimensions()
+        val fps = if (project.exportFps >= 60) 60 else 30
+        val requestedBitrateBps = project.resolvedExportBitrateBps()
         val totalDurationMs = project.totalDurationMs.coerceIn(5_000L, 180_000L)
         val totalFrames = ((totalDurationMs / 1000.0) * fps).toInt().coerceAtLeast(30)
 
@@ -133,12 +125,12 @@ class Mp4VideoExporter(
             )
         }
 
-        val clipResources = prepareClipBitmaps(clips, project.coverThumbnailUrl)
+        val clipResources = prepareClipBitmaps(clips, project.coverThumbnailUrl, width, height)
         onProgress(
             ExportProgressUpdate(
                 progress = 0.12f,
                 stage = ExportStage.RENDERING,
-                statusMessage = "Encoding ${width}x${height} H.264 video…",
+                statusMessage = "Encoding ${width}x${height} ${fps}fps Pro H.264…",
                 currentFrame = 0,
                 totalFrames = totalFrames
             )
@@ -149,18 +141,17 @@ class Mp4VideoExporter(
             .replace(Regex("[^a-zA-Z0-9_-]"), "_")
             .take(28)
             .ifBlank { "ClipPulse" }
-        val fileName = "${safeName}_${ratio.label.replace(":", "x")}_${System.currentTimeMillis()}.mp4"
+        val fileName = "${safeName}_${project.exportResolution.shortLabel}_${ratio.label.replace(":", "x")}_${fps}fps_${System.currentTimeMillis()}.mp4"
         val tempFile = File(exportDir, fileName)
 
         try {
-            encodeVideoAndAudioToMp4(
+            val encodeSpec = encodeVideoAndAudioToMp4(
                 outputFile = tempFile,
-                width = width,
-                height = height,
-                fps = fps,
-                bitrate = project.exportQuality.bitrateBps,
+                requestedWidth = width,
+                requestedHeight = height,
+                requestedFps = fps,
+                requestedBitrate = requestedBitrateBps,
                 totalDurationMs = totalDurationMs,
-                totalFrames = totalFrames,
                 project = project,
                 clips = clips,
                 clipResources = clipResources,
@@ -172,7 +163,7 @@ class Mp4VideoExporter(
                 ExportProgressUpdate(
                     progress = 0.95f,
                     stage = ExportStage.SAVING,
-                    statusMessage = "Saving to Gallery (Movies/ClipPulse)…",
+                    statusMessage = "Saving Master MP4 to Gallery (Movies/ClipPulse)…",
                     currentFrame = totalFrames,
                     totalFrames = totalFrames
                 )
@@ -181,23 +172,27 @@ class Mp4VideoExporter(
                 sourceFile = tempFile,
                 fileName = fileName,
                 displayTitle = project.title,
-                durationMs = totalDurationMs
+                durationMs = totalDurationMs,
+                width = encodeSpec.width,
+                height = encodeSpec.height
             )
             onProgress(
                 ExportProgressUpdate(
                     progress = 1.0f,
                     stage = ExportStage.SAVING,
-                    statusMessage = "Export complete!",
+                    statusMessage = "Master export complete!",
                     currentFrame = totalFrames,
                     totalFrames = totalFrames
                 )
             )
 
+            val mbps = (encodeSpec.bitrateBps / 1_000_000).coerceAtLeast(1)
+            val fallbackNote = if (encodeSpec.width < width || encodeSpec.height < height) " (HW Cap)" else ""
             ExportResult(
                 outputUri = finalUri,
                 fileName = fileName,
                 durationSec = (totalDurationMs / 1000L).toInt(),
-                resolutionLabel = "${width}x${height} (${ratio.label})",
+                resolutionLabel = "${encodeSpec.width}x${encodeSpec.height} · ${encodeSpec.fps}fps · ${mbps}Mbps (${ratio.label})$fallbackNote",
                 savedToGallery = inGallery
             )
         } finally {
@@ -209,6 +204,14 @@ class Mp4VideoExporter(
         }
     }
 
+    private data class ActiveEncodeSpec(
+        val width: Int,
+        val height: Int,
+        val fps: Int,
+        val bitrateBps: Int,
+        val highProfile: Boolean
+    )
+
     private data class ClipFrameSource(
         val clip: TimelineClipItem,
         val staticBitmap: Bitmap?,
@@ -217,9 +220,16 @@ class Mp4VideoExporter(
 
     private fun prepareClipBitmaps(
         clips: List<TimelineClipItem>,
-        fallbackThumbUrl: String
+        fallbackThumbUrl: String,
+        targetWidth: Int,
+        targetHeight: Int
     ): List<ClipFrameSource> {
         val cachedFallback = downloadBitmapOrNull(fallbackThumbUrl)
+        val highResOptions = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inScaled = false
+            inDither = false
+        }
         return clips.map { clip ->
             when (clip.sourceType) {
                 ClipSourceType.LOCAL_VIDEO -> {
@@ -228,15 +238,18 @@ class Mp4VideoExporter(
                             setDataSource(context, Uri.parse(clip.sourceUri))
                         }
                     }.getOrNull()
-                    val firstFrame = runCatching {
-                        retriever?.getFrameAtTime(clip.trimStartMs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                    }.getOrNull()
+                    val firstFrame = extractCrispVideoFrame(
+                        retriever = retriever,
+                        timeUs = clip.trimStartMs * 1000L,
+                        targetWidth = targetWidth,
+                        targetHeight = targetHeight
+                    )
                     ClipFrameSource(clip, firstFrame ?: cachedFallback?.copy(Bitmap.Config.ARGB_8888, false), retriever)
                 }
                 ClipSourceType.LOCAL_IMAGE -> {
                     val bmp = runCatching {
                         context.contentResolver.openInputStream(Uri.parse(clip.sourceUri))?.use {
-                            BitmapFactory.decodeStream(it)
+                            BitmapFactory.decodeStream(it, null, highResOptions)
                         }
                     }.getOrNull()
                     ClipFrameSource(clip, bmp ?: cachedFallback?.copy(Bitmap.Config.ARGB_8888, false), null)
@@ -250,46 +263,99 @@ class Mp4VideoExporter(
         }
     }
 
+    private fun extractCrispVideoFrame(
+        retriever: MediaMetadataRetriever?,
+        timeUs: Long,
+        targetWidth: Int,
+        targetHeight: Int
+    ): Bitmap? {
+        if (retriever == null) return null
+        return runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+                // Keep native resolution up to target output dimensions for razor-sharp frames
+                val maxW = maxOf(targetWidth, 1080)
+                val maxH = maxOf(targetHeight, 1080)
+                retriever.getScaledFrameAtTime(
+                    timeUs,
+                    MediaMetadataRetriever.OPTION_CLOSEST,
+                    maxW,
+                    maxH
+                ) ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            } else {
+                retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
+                    ?: retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+            }
+        }.getOrNull()
+    }
+
     private fun downloadBitmapOrNull(url: String): Bitmap? {
         if (url.isBlank()) return null
+        val highResOptions = BitmapFactory.Options().apply {
+            inPreferredConfig = Bitmap.Config.ARGB_8888
+            inScaled = false
+        }
         return runCatching {
             val req = Request.Builder().url(url).build()
             httpClient.newCall(req).execute().use { resp ->
                 if (resp.isSuccessful) {
-                    resp.body?.byteStream()?.use { BitmapFactory.decodeStream(it) }
+                    resp.body?.byteStream()?.use { BitmapFactory.decodeStream(it, null, highResOptions) }
                 } else null
             }
         }.getOrNull()
     }
 
-    private suspend fun encodeVideoAndAudioToMp4(
-        outputFile: File,
+    private fun buildHighQualityVideoFormat(
         width: Int,
         height: Int,
         fps: Int,
         bitrate: Int,
+        enableHighProfile: Boolean
+    ): MediaFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
+        setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
+        setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
+        setInteger(MediaFormat.KEY_FRAME_RATE, fps)
+        // 1-second keyframe interval preserves crispness across Instagram Reels / YouTube Shorts re-encoding
+        setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 1)
+        if (enableHighProfile) {
+            val maxDim = maxOf(width, height)
+            val avcLevel = when {
+                maxDim >= 3840 && fps >= 60 -> MediaCodecInfo.CodecProfileLevel.AVCLevel52
+                maxDim >= 3840 -> MediaCodecInfo.CodecProfileLevel.AVCLevel51
+                maxDim >= 2560 -> MediaCodecInfo.CodecProfileLevel.AVCLevel5
+                fps >= 60 -> MediaCodecInfo.CodecProfileLevel.AVCLevel42
+                else -> MediaCodecInfo.CodecProfileLevel.AVCLevel41
+            }
+            setInteger(MediaFormat.KEY_PROFILE, MediaCodecInfo.CodecProfileLevel.AVCProfileHigh)
+            setInteger(MediaFormat.KEY_LEVEL, avcLevel)
+            setInteger(MediaFormat.KEY_BITRATE_MODE, MediaCodecInfo.EncoderCapabilities.BITRATE_MODE_VBR)
+            // Rec.709 HD color metadata matching iPhone H.264 exports so colors stay accurate on upload
+            setInteger(MediaFormat.KEY_COLOR_STANDARD, MediaFormat.COLOR_STANDARD_BT709)
+            setInteger(MediaFormat.KEY_COLOR_TRANSFER, MediaFormat.COLOR_TRANSFER_SDR_VIDEO)
+            setInteger(MediaFormat.KEY_COLOR_RANGE, MediaFormat.COLOR_RANGE_LIMITED)
+        }
+    }
+
+    private suspend fun encodeVideoAndAudioToMp4(
+        outputFile: File,
+        requestedWidth: Int,
+        requestedHeight: Int,
+        requestedFps: Int,
+        requestedBitrate: Int,
         totalDurationMs: Long,
-        totalFrames: Int,
         project: ClipProject,
         clips: List<TimelineClipItem>,
         clipResources: List<ClipFrameSource>,
         ttsWavFile: File?,
         onProgress: (ExportProgressUpdate) -> Unit
-    ) {
-        val videoFormat = MediaFormat.createVideoFormat(MediaFormat.MIMETYPE_VIDEO_AVC, width, height).apply {
-            setInteger(MediaFormat.KEY_COLOR_FORMAT, MediaCodecInfo.CodecCapabilities.COLOR_FormatSurface)
-            setInteger(MediaFormat.KEY_BIT_RATE, bitrate)
-            setInteger(MediaFormat.KEY_FRAME_RATE, fps)
-            setInteger(MediaFormat.KEY_I_FRAME_INTERVAL, 2)
-        }
-
+    ): ActiveEncodeSpec {
         val includeAudio = (project.musicPreset != MusicTrackPreset.NONE && project.musicVolume > 0.02f) ||
             (ttsWavFile != null && ttsWavFile.exists())
 
         val sampleRate = ProceduralMusicEngine.SAMPLE_RATE
         val audioFormat = MediaFormat.createAudioFormat(MediaFormat.MIMETYPE_AUDIO_AAC, sampleRate, 1).apply {
             setInteger(MediaFormat.KEY_AAC_PROFILE, MediaCodecInfo.CodecProfileLevel.AACObjectLC)
-            setInteger(MediaFormat.KEY_BIT_RATE, 96_000)
+            // 192 kbps crisp AAC-LC audio for upload clarity
+            setInteger(MediaFormat.KEY_BIT_RATE, 192_000)
             setInteger(MediaFormat.KEY_MAX_INPUT_SIZE, 16384)
         }
 
@@ -304,7 +370,59 @@ class Mp4VideoExporter(
         var audioTrackIndex = -1
 
         try {
-            videoEncoder.configure(videoFormat, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+            // Graceful hardware fallback cascade: requested 4K/2K/1080p @ 60fps -> 30fps -> 1080p 30fps High -> Safe Baseline
+            val (w1080, h1080) = project.aspectRatio.dimensionsFor(ExportResolution.RES_1080P)
+            val bitrate1080 = resolveExportBitrateMbps(
+                ExportResolution.RES_1080P,
+                project.exportBitrateTier,
+                30
+            ) * 1_000_000
+
+            val candidateSpecs = buildList {
+                add(ActiveEncodeSpec(requestedWidth, requestedHeight, requestedFps, requestedBitrate, true))
+                if (requestedFps > 30) {
+                    val b30 = resolveExportBitrateMbps(project.exportResolution, project.exportBitrateTier, 30) * 1_000_000
+                    add(ActiveEncodeSpec(requestedWidth, requestedHeight, 30, b30, true))
+                }
+                if (maxOf(requestedWidth, requestedHeight) > maxOf(w1080, h1080)) {
+                    add(ActiveEncodeSpec(w1080, h1080, 30, bitrate1080, true))
+                }
+                add(
+                    ActiveEncodeSpec(
+                        width = minOf(requestedWidth, w1080),
+                        height = minOf(requestedHeight, h1080),
+                        fps = 30,
+                        bitrateBps = minOf(requestedBitrate, 14_000_000),
+                        highProfile = false
+                    )
+                )
+            }
+
+            var chosenSpec: ActiveEncodeSpec? = null
+            for (spec in candidateSpecs) {
+                val configured = runCatching {
+                    val fmt = buildHighQualityVideoFormat(
+                        width = spec.width,
+                        height = spec.height,
+                        fps = spec.fps,
+                        bitrate = spec.bitrateBps,
+                        enableHighProfile = spec.highProfile
+                    )
+                    videoEncoder.configure(fmt, null, null, MediaCodec.CONFIGURE_FLAG_ENCODE)
+                }.isSuccess
+                if (configured) {
+                    chosenSpec = spec
+                    break
+                } else {
+                    runCatching { videoEncoder.reset() }
+                }
+            }
+
+            val activeSpec = chosenSpec ?: throw IllegalStateException("Device H.264 encoder could not be configured")
+            val width = activeSpec.width
+            val height = activeSpec.height
+            val fps = activeSpec.fps
+            val totalFrames = ((totalDurationMs / 1000.0) * fps).toInt().coerceAtLeast(30)
             val inputSurface = videoEncoder.createInputSurface()
             videoEncoder.start()
 
@@ -313,7 +431,6 @@ class Mp4VideoExporter(
 
             val videoBufferInfo = MediaCodec.BufferInfo()
             val audioBufferInfo = MediaCodec.BufferInfo()
-            val transitionMs = (project.transitionDurationSec * 1000f).toLong().coerceIn(200L, 2_000L)
 
             // Precompute clip start offsets on timeline
             val clipStartOffsets = LongArray(clips.size)
@@ -434,21 +551,33 @@ class Mp4VideoExporter(
                 val clipRemainingMs = (activeRes.clip.effectiveDurationMs - localClipTimeMs).coerceAtLeast(0L)
 
                 val nextRes = if (activeIdx + 1 < clipResources.size) clipResources[activeIdx + 1] else null
-                val transProgress = if (nextRes != null && clipRemainingMs < transitionMs) {
-                    1f - (clipRemainingMs.toFloat() / transitionMs.toFloat())
+                val activeTransition = project.resolvedTransitionAfter(activeIdx)
+                val activeTransitionMs = (project.resolvedTransitionDurationSec(activeIdx) * 1000f)
+                    .toLong()
+                    .coerceIn(200L, 2_000L)
+                val transProgress = if (
+                    nextRes != null &&
+                    activeTransition != TransitionPreset.NONE &&
+                    clipRemainingMs < activeTransitionMs
+                ) {
+                    1f - (clipRemainingMs.toFloat() / activeTransitionMs.toFloat())
                 } else {
                     0f
                 }
 
                 val activeBitmap: Bitmap? = if (activeRes.retriever != null) {
-                    val sampleBucket = localClipTimeMs / 400L // sample every 0.4s for snappy encoding
+                    // Finer 100ms sampling for smooth iPhone-like motion on local video clips
+                    val sampleBucket = localClipTimeMs / 100L
                     if (activeIdx != lastClipIndex || sampleBucket != lastVideoSampleBucket || cachedVideoFrame == null) {
                         lastClipIndex = activeIdx
                         lastVideoSampleBucket = sampleBucket
                         val targetUs = (activeRes.clip.trimStartMs + localClipTimeMs) * 1000L
-                        val extracted = runCatching {
-                            activeRes.retriever.getFrameAtTime(targetUs, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
-                        }.getOrNull()
+                        val extracted = extractCrispVideoFrame(
+                            retriever = activeRes.retriever,
+                            timeUs = targetUs,
+                            targetWidth = width,
+                            targetHeight = height
+                        )
                         if (extracted != null) {
                             cachedVideoFrame?.let { if (it !== activeRes.staticBitmap && !it.isRecycled) it.recycle() }
                             cachedVideoFrame = extracted
@@ -459,7 +588,9 @@ class Mp4VideoExporter(
                     activeRes.staticBitmap
                 }
 
-                val canvas = inputSurface.lockCanvas(null)
+                // Prefer GPU-accelerated hardware canvas for crisp filtering & fast 30/60fps rendering
+                val canvas = runCatching { inputSurface.lockHardwareCanvas() }
+                    .getOrElse { inputSurface.lockCanvas(null) }
                 try {
                     VideoFilterRenderer.drawCompositeFrame(
                         canvas = canvas,
@@ -469,7 +600,8 @@ class Mp4VideoExporter(
                         timeMs = timeMs,
                         currentBitmap = activeBitmap,
                         nextBitmap = nextRes?.staticBitmap,
-                        transitionProgress = transProgress
+                        transitionProgress = transProgress,
+                        transitionPreset = activeTransition
                     )
                 } finally {
                     inputSurface.unlockCanvasAndPost(canvas)
@@ -578,6 +710,7 @@ class Mp4VideoExporter(
 
             cachedVideoFrame?.let { if (!it.isRecycled) it.recycle() }
             inputSurface.release()
+            return activeSpec
         } catch (e: Exception) {
             Log.e(TAG, "MP4 export failed", e)
             throw e
@@ -623,7 +756,9 @@ class Mp4VideoExporter(
         sourceFile: File,
         fileName: String,
         displayTitle: String,
-        durationMs: Long
+        durationMs: Long,
+        width: Int,
+        height: Int
     ): Pair<Uri, Boolean> {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val nowMs = System.currentTimeMillis()
@@ -633,6 +768,9 @@ class Mp4VideoExporter(
                 put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
                 put(MediaStore.Video.Media.RELATIVE_PATH, "${Environment.DIRECTORY_MOVIES}/ClipPulse")
                 put(MediaStore.Video.Media.DURATION, durationMs)
+                put(MediaStore.Video.Media.WIDTH, width)
+                put(MediaStore.Video.Media.HEIGHT, height)
+                put(MediaStore.Video.Media.RESOLUTION, "${width}x${height}")
                 put(MediaStore.Video.Media.DATE_ADDED, nowMs / 1000L)
                 put(MediaStore.Video.Media.DATE_TAKEN, nowMs)
                 put(MediaStore.Video.Media.IS_PENDING, 1)

@@ -1,6 +1,5 @@
 package com.example
 
-import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
 import android.provider.OpenableColumns
@@ -24,14 +23,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.credentials.CredentialManager
+import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
+import com.example.auth.authStateFlow
+import com.example.auth.signOutUser
+import com.example.data.firebase.CloudProjectRepository
+import com.example.data.local.AppDatabase
+import com.example.data.local.ProjectRepository
 import com.example.media.QuickShareCoordinator
 import com.example.media.QuickShareTarget
 import com.example.ui.screens.*
 import com.example.ui.theme.*
 import com.example.viewmodel.ClipStudioViewModel
 import com.example.viewmodel.MainTab
+import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
+import com.google.firebase.auth.auth
+import com.google.firebase.firestore.FirebaseFirestore
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
@@ -45,21 +57,73 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             ClipPulseTheme {
-                ClipPulseApp()
+                ClipPulseAuthGate()
             }
         }
     }
 }
 
 @Composable
+fun ClipPulseAuthGate(
+    auth: FirebaseAuth = Firebase.auth
+) {
+    val currentUser by auth.authStateFlow().collectAsStateWithLifecycle(initialValue = auth.currentUser)
+    val user = currentUser
+
+    if (user == null) {
+        AuthScreen(onAuthSuccess = { /* Reactive authStateFlow transitions to ClipPulseApp */ })
+    } else {
+        val uid = user.uid
+        val displayName = user.displayName?.takeIf { it.isNotBlank() } ?: "ClipPulse Creator"
+        val photoUrl = user.photoUrl?.toString()
+
+        // Key composition & ViewModel by UID so account switches/sign-out cleanly tear down listeners
+        key(uid) {
+            val viewModel: ClipStudioViewModel = viewModel(
+                key = uid,
+                factory = viewModelFactory {
+                    initializer {
+                        val app = checkNotNull(this[APPLICATION_KEY]) {
+                            "APPLICATION_KEY missing from CreationExtras"
+                        }
+                        val databaseId = app.getString(R.string.firestore_database_id)
+                        val firestore = FirebaseFirestore.getInstance(databaseId)
+                        val localRepo = ProjectRepository(AppDatabase.getInstance(app).projectDao())
+                        val cloudRepo = CloudProjectRepository(firestore, auth)
+                        ClipStudioViewModel(
+                            appContext = app.applicationContext,
+                            repository = localRepo,
+                            cloudRepository = cloudRepo,
+                            currentUserId = uid
+                        )
+                    }
+                }
+            )
+
+            LaunchedEffect(uid, displayName, photoUrl) {
+                viewModel.syncUserProfile(displayName, photoUrl)
+            }
+
+            ClipPulseApp(
+                viewModel = viewModel,
+                userDisplayName = displayName
+            )
+        }
+    }
+}
+
+@Composable
 fun ClipPulseApp(
-    viewModel: ClipStudioViewModel = viewModel()
+    viewModel: ClipStudioViewModel,
+    userDisplayName: String
 ) {
     val context = LocalContext.current
     val snackbarHostState = remember { SnackbarHostState() }
     val uiScope = rememberCoroutineScope()
+    val credentialManager = remember(context) { CredentialManager.create(context) }
 
     val isOnline by viewModel.isOnline.collectAsStateWithLifecycle()
+    val cloudSyncState by viewModel.cloudSyncState.collectAsStateWithLifecycle()
     val savedProjects by viewModel.savedProjects.collectAsStateWithLifecycle()
     val selectedTab by viewModel.selectedTab.collectAsStateWithLifecycle()
     val inEditor by viewModel.inEditorScreen.collectAsStateWithLifecycle()
@@ -75,6 +139,7 @@ fun ClipPulseApp(
     val isMusicPreviewing by viewModel.isMusicPreviewing.collectAsStateWithLifecycle()
     val isTtsPreviewing by viewModel.isTtsPreviewing.collectAsStateWithLifecycle()
     val isRegeneratingCaptions by viewModel.isRegeneratingCaptions.collectAsStateWithLifecycle()
+    val socialCaptionState by viewModel.socialCaptionState.collectAsStateWithLifecycle()
     val isGeneratingAutoSubs by viewModel.isGeneratingAutoSubtitles.collectAsStateWithLifecycle()
     val exportState by viewModel.exportState.collectAsStateWithLifecycle()
     val statusBanner by viewModel.statusBanner.collectAsStateWithLifecycle()
@@ -155,6 +220,8 @@ fun ClipPulseApp(
             isMusicPreviewing = isMusicPreviewing,
             isTtsPreviewing = isTtsPreviewing,
             isGeneratingAutoCaptions = isGeneratingAutoSubs,
+            isRegeneratingSocialCaptions = isRegeneratingCaptions,
+            socialCaptionState = socialCaptionState,
             ttsLanguages = viewModel.ttsManager.supportedLanguages,
             snackbarHostState = snackbarHostState,
             onBack = { viewModel.closeEditor() },
@@ -200,10 +267,28 @@ fun ClipPulseApp(
             onEffectIntensityChange = { viewModel.updateEffectIntensity(it) },
             onSelectTransition = { viewModel.updateTransition(it) },
             onTransitionDurationChange = { viewModel.updateTransitionDuration(it) },
+            onUpdateClipTransition = { clipId, preset -> viewModel.updateClipTransition(clipId, preset) },
+            onUpdateClipTransitionDuration = { clipId, dur -> viewModel.updateClipTransitionDuration(clipId, dur) },
+            onApplyTransitionToAll = { preset, dur -> viewModel.applyTransitionToAllClips(preset, dur) },
+            onPreviewSpliceTransition = { idx -> viewModel.previewSpliceTransition(idx) },
             onSelectMusicPreset = { viewModel.selectMusicPreset(it) },
             onToggleMusicPreview = { viewModel.toggleMusicPreview() },
             onPickCustomAudio = { customAudioPicker.launch(arrayOf("audio/*")) },
-            onMusicVolumeChange = { viewModel.updateMusicVolume(it) }
+            onMusicVolumeChange = { viewModel.updateMusicVolume(it) },
+            onUpdateSocialCaptions = { viewModel.updateSocialCaptions(it) },
+            onGenerateSocialCaptions = { tone, hint -> viewModel.regenerateSocialCaptions(tone, hint) },
+            onDismissSocialCaptionError = { viewModel.clearSocialCaptionError() },
+            onQuickShareCaptionText = { shareText(it) },
+            onQuickShareCaptionTarget = { target, captionPayload ->
+                val exportedUriStr = activeProject.lastExportedUri
+                if (!exportedUriStr.isNullOrBlank()) {
+                    shareVideoToTarget(Uri.parse(exportedUriStr), activeProject, target)
+                } else {
+                    val msg = QuickShareCoordinator.shareTextOnly(context, captionPayload, target)
+                    showToastMessage(msg)
+                }
+            },
+            onCopiedFeedback = { msg -> showToastMessage(msg) }
         )
 
         if (showExportSheet) {
@@ -212,7 +297,11 @@ fun ClipPulseApp(
                 exportState = exportState,
                 onDismiss = { showExportSheet = false },
                 onSelectAspectRatio = { viewModel.updateAspectRatio(it) },
-                onSelectQuality = { viewModel.updateExportQuality(it) },
+                onSelectResolution = { viewModel.updateExportResolution(it) },
+                onSelectBitrateTier = { viewModel.updateExportBitrateTier(it) },
+                onSelectFps = { viewModel.updateExportFps(it) },
+                onApplySocialPreset = { viewModel.applySocialExportPreset(it) },
+                onToggleProClarity = { viewModel.updateProClarity(it) },
                 onStartExport = {
                     showExportSheet = false
                     viewModel.startExport()
@@ -225,11 +314,14 @@ fun ClipPulseApp(
         ExportProgressModal(
             project = activeProject,
             exportState = exportState,
+            isGeneratingSocialCaptions = isRegeneratingCaptions,
             onCancelExport = { viewModel.cancelExport() },
             onRetryExport = { viewModel.startExport() },
             onDismiss = { viewModel.resetExportState() },
             onQuickShareTarget = { uri, target -> shareVideoToTarget(uri, activeProject, target) },
-            onOpenInGallery = { uri -> openVideoInGallery(uri) }
+            onOpenInGallery = { uri -> openVideoInGallery(uri) },
+            onGenerateAiCaptions = { viewModel.regenerateSocialCaptions("Viral Punchy") },
+            onCopiedFeedback = { msg -> showToastMessage(msg) }
         )
     } else {
         Scaffold(
@@ -309,6 +401,8 @@ fun ClipPulseApp(
                 when (selectedTab) {
                     MainTab.CREATE -> HomeCreateScreen(
                         isOnline = isOnline,
+                        userDisplayName = userDisplayName,
+                        cloudSyncState = cloudSyncState,
                         youtubeUrl = youtubeUrl,
                         targetDurationSec = targetDurationSec,
                         selectedAspectRatio = selectedAspectRatio,
@@ -325,7 +419,11 @@ fun ClipPulseApp(
                         onPickLocalImage = {
                             homePhotoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
                         },
-                        onOpenCandidate = { info, cand -> viewModel.openCandidateInEditor(info, cand) }
+                        onOpenCandidate = { info, cand -> viewModel.openCandidateInEditor(info, cand) },
+                        onSignOut = {
+                            viewModel.stopPlayback()
+                            signOutUser(credentialManager, uiScope)
+                        }
                     )
                     MainTab.PROJECTS -> ProjectsLibraryScreen(
                         projects = savedProjects,
@@ -345,10 +443,14 @@ fun ClipPulseApp(
                     )
                     MainTab.CAPTIONS -> SocialCaptionsScreen(
                         project = activeProject,
+                        savedProjects = savedProjects,
                         isOnline = isOnline,
                         isRegenerating = isRegeneratingCaptions,
+                        captionState = socialCaptionState,
+                        onSelectProject = { viewModel.selectProjectForCaptions(it) },
                         onUpdateBundle = { viewModel.updateSocialCaptions(it) },
-                        onRegenerateAi = { tone -> viewModel.regenerateSocialCaptions(tone) },
+                        onRegenerateAi = { tone, hint -> viewModel.regenerateSocialCaptions(tone, hint) },
+                        onDismissError = { viewModel.clearSocialCaptionError() },
                         onQuickShareText = { shareText(it) },
                         onQuickShareTarget = { target, captionPayload ->
                             val exportedUriStr = activeProject.lastExportedUri

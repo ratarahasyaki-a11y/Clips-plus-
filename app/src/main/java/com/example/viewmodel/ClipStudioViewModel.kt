@@ -1,14 +1,14 @@
 package com.example.viewmodel
 
-import android.app.Application
+import android.content.Context
 import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.util.Log
-import androidx.lifecycle.AndroidViewModel
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.data.ai.ViralClipAiService
 import com.example.data.ai.YouTubeMetadataService
-import com.example.data.local.AppDatabase
+import com.example.data.firebase.CloudProjectRepository
 import com.example.data.local.ProjectRepository
 import com.example.data.network.ConnectivityObserver
 import com.example.media.ExportResult
@@ -16,7 +16,9 @@ import com.example.media.ExportStage
 import com.example.media.Mp4VideoExporter
 import com.example.media.ProceduralMusicEngine
 import com.example.media.TtsVoiceoverManager
+import com.example.media.VideoFrameExtractor
 import com.example.model.*
+import com.google.firebase.firestore.FirebaseFirestoreException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -25,12 +27,14 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
-import java.util.UUID
 
 private const val TAG = "ClipStudioViewModel"
 
@@ -59,11 +63,25 @@ sealed interface ExportUiState {
     data class Error(val message: String) : ExportUiState
 }
 
+sealed interface CloudSyncUiState {
+    data object Loading : CloudSyncUiState
+    data class Synced(val count: Int) : CloudSyncUiState
+    data class Error(val message: String) : CloudSyncUiState
+}
+
+sealed interface SocialCaptionUiState {
+    data object Idle : SocialCaptionUiState
+    data class Analyzing(val statusMessage: String) : SocialCaptionUiState
+    data class Success(val sourceSummary: String, val toneLabel: String) : SocialCaptionUiState
+    data class Error(val message: String) : SocialCaptionUiState
+}
+
 enum class MainTab { CREATE, PROJECTS, CAPTIONS }
 
 enum class EditorToolTab(val label: String) {
     CLIPS("Clips"),
-    CAPTIONS("Captions"),
+    CAPTIONS("Subtitles"),
+    AI_POST("AI Post"),
     TEXT("Text"),
     TTS("TTS Voice"),
     FILTERS("Filters"),
@@ -72,21 +90,83 @@ enum class EditorToolTab(val label: String) {
     MUSIC("Music")
 }
 
-class ClipStudioViewModel(application: Application) : AndroidViewModel(application) {
+class ClipStudioViewModel(
+    private val appContext: Context,
+    private val repository: ProjectRepository,
+    private val cloudRepository: CloudProjectRepository,
+    private val currentUserId: String
+) : ViewModel() {
 
-    private val repository = ProjectRepository(AppDatabase.getInstance(application).projectDao())
     private val youtubeService = YouTubeMetadataService()
     private val aiService = ViralClipAiService()
-    private val connectivityObserver = ConnectivityObserver(application)
+    private val connectivityObserver = ConnectivityObserver(appContext)
     val musicEngine = ProceduralMusicEngine()
-    val ttsManager = TtsVoiceoverManager(application)
-    private val mp4Exporter = Mp4VideoExporter(application, musicEngine, ttsManager)
+    val ttsManager = TtsVoiceoverManager(appContext)
+    private val mp4Exporter = Mp4VideoExporter(appContext, musicEngine, ttsManager)
 
     val isOnline: StateFlow<Boolean> = connectivityObserver.isOnlineFlow
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), connectivityObserver.isCurrentlyOnline())
 
-    val savedProjects: StateFlow<List<ClipProject>> = repository.allProjects
-        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+    private val cloudProjectsFlow = cloudRepository.observeProjects(currentUserId)
+        .onEach { remoteList ->
+            // Cache latest cloud projects locally so they stay accessible offline
+            remoteList.forEach { remote ->
+                val existingLocal = repository.getProject(remote.id)
+                val merged = if (existingLocal != null) {
+                    remote.copy(
+                        lastExportedUri = existingLocal.lastExportedUri,
+                        customMusicUri = existingLocal.customMusicUri ?: remote.customMusicUri
+                    )
+                } else {
+                    remote
+                }
+                if (existingLocal == null || remote.updatedAtMs > existingLocal.updatedAtMs) {
+                    repository.saveProject(merged)
+                }
+            }
+        }
+
+    val cloudSyncState: StateFlow<CloudSyncUiState> = cloudProjectsFlow
+        .map<List<ClipProject>, CloudSyncUiState> { CloudSyncUiState.Synced(it.size) }
+        .catch { error ->
+            val firestoreError = generateSequence(error) { it.cause }
+                .filterIsInstance<FirebaseFirestoreException>()
+                .firstOrNull()
+            if (firestoreError == null && error is CancellationException) throw error
+            val rootError = firestoreError ?: error
+            Log.w(TAG, "Cloud project sync error", rootError)
+            emit(CloudSyncUiState.Error(rootError.localizedMessage ?: "Cloud sync unavailable"))
+        }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), CloudSyncUiState.Loading)
+
+    private val safeCloudProjects = cloudProjectsFlow
+        .catch { error ->
+            val firestoreError = generateSequence(error) { it.cause }
+                .filterIsInstance<FirebaseFirestoreException>()
+                .firstOrNull()
+            if (firestoreError == null && error is CancellationException) throw error
+            emit(emptyList())
+        }
+
+    val savedProjects: StateFlow<List<ClipProject>> = combine(
+        repository.allProjects,
+        safeCloudProjects
+    ) { localList, cloudList ->
+        val byId = LinkedHashMap<String, ClipProject>()
+        localList.forEach { byId[it.id] = it }
+        cloudList.forEach { remote ->
+            val local = byId[remote.id]
+            if (local == null) {
+                byId[remote.id] = remote
+            } else if (remote.updatedAtMs > local.updatedAtMs) {
+                byId[remote.id] = remote.copy(
+                    lastExportedUri = local.lastExportedUri,
+                    customMusicUri = local.customMusicUri ?: remote.customMusicUri
+                )
+            }
+        }
+        byId.values.sortedByDescending { it.updatedAtMs }
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private val _selectedTab = MutableStateFlow(MainTab.CREATE)
     val selectedTab: StateFlow<MainTab> = _selectedTab.asStateFlow()
@@ -129,6 +209,9 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
 
     private val _isRegeneratingCaptions = MutableStateFlow(false)
     val isRegeneratingCaptions: StateFlow<Boolean> = _isRegeneratingCaptions.asStateFlow()
+
+    private val _socialCaptionState = MutableStateFlow<SocialCaptionUiState>(SocialCaptionUiState.Idle)
+    val socialCaptionState: StateFlow<SocialCaptionUiState> = _socialCaptionState.asStateFlow()
 
     private val _isGeneratingAutoSubtitles = MutableStateFlow(false)
     val isGeneratingAutoSubtitles: StateFlow<Boolean> = _isGeneratingAutoSubtitles.asStateFlow()
@@ -185,10 +268,24 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
         _inEditorScreen.value = true
     }
 
+    fun syncUserProfile(displayName: String, photoUrl: String?) {
+        viewModelScope.launch {
+            cloudRepository.upsertUserProfile(currentUserId, displayName, photoUrl)
+                .onFailure { err ->
+                    Log.w(TAG, "Profile cloud sync deferred: ${err.message}")
+                }
+        }
+    }
+
     fun deleteProject(projectId: String) {
         viewModelScope.launch {
             repository.deleteProject(projectId)
-            _statusBanner.value = "Project deleted"
+            val cloudResult = cloudRepository.deleteProject(currentUserId, projectId)
+            _statusBanner.value = if (cloudResult.isSuccess) {
+                "Project deleted from device & cloud"
+            } else {
+                "Project deleted locally (cloud sync pending)"
+            }
         }
     }
 
@@ -399,7 +496,7 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
 
     private suspend fun buildLocalTimelineClip(uri: Uri, isVideo: Boolean, index: Int): TimelineClipItem =
         withContext(Dispatchers.IO) {
-            val context = getApplication<Application>()
+            val context = appContext
             runCatching {
                 context.contentResolver.takePersistableUriPermission(
                     uri,
@@ -499,7 +596,72 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
 
     fun updateProjectTitle(title: String) = updateProject { it.copy(title = title) }
     fun updateAspectRatio(ratio: AspectRatioPreset) = updateProject { it.copy(aspectRatio = ratio) }
-    fun updateExportQuality(quality: ExportQuality) = updateProject { it.copy(exportQuality = quality) }
+    fun updateExportQuality(quality: ExportQuality) = updateProject { proj ->
+        val res = when (quality) {
+            ExportQuality.HD_720P -> ExportResolution.RES_720P
+            ExportQuality.FULL_HD_1080P, ExportQuality.PRO_IPHONE_MASTER -> ExportResolution.RES_1080P
+        }
+        val tier = when (quality) {
+            ExportQuality.HD_720P -> ExportBitrateTier.STANDARD
+            ExportQuality.FULL_HD_1080P -> ExportBitrateTier.HIGH
+            ExportQuality.PRO_IPHONE_MASTER -> ExportBitrateTier.MASTER
+        }
+        proj.copy(
+            exportQuality = quality,
+            exportResolution = res,
+            exportBitrateTier = tier,
+            exportFps = quality.fps
+        )
+    }
+
+    fun updateExportResolution(resolution: ExportResolution) = updateProject { proj ->
+        proj.copy(
+            exportResolution = resolution,
+            exportQuality = deriveLegacyExportQuality(resolution, proj.exportBitrateTier, proj.exportFps)
+        )
+    }
+
+    fun updateExportBitrateTier(tier: ExportBitrateTier) = updateProject { proj ->
+        proj.copy(
+            exportBitrateTier = tier,
+            exportQuality = deriveLegacyExportQuality(proj.exportResolution, tier, proj.exportFps)
+        )
+    }
+
+    fun updateExportFps(fps: Int) = updateProject { proj ->
+        val safeFps = if (fps >= 60) 60 else 30
+        proj.copy(
+            exportFps = safeFps,
+            exportQuality = deriveLegacyExportQuality(proj.exportResolution, proj.exportBitrateTier, safeFps)
+        )
+    }
+
+    fun applySocialExportPreset(preset: SocialPlatformExportPreset) {
+        updateProject { proj ->
+            proj.copy(
+                aspectRatio = preset.aspectRatio,
+                exportResolution = preset.resolution,
+                exportBitrateTier = preset.bitrateTier,
+                exportFps = preset.fps,
+                proClarityEnabled = preset.proClarity,
+                exportQuality = deriveLegacyExportQuality(preset.resolution, preset.bitrateTier, preset.fps)
+            )
+        }
+        _statusBanner.value = "Export tuned for ${preset.label} (${preset.tagline})"
+    }
+
+    private fun deriveLegacyExportQuality(
+        resolution: ExportResolution,
+        tier: ExportBitrateTier,
+        fps: Int
+    ): ExportQuality = when {
+        resolution == ExportResolution.RES_720P -> ExportQuality.HD_720P
+        tier == ExportBitrateTier.MASTER || fps >= 60 || resolution == ExportResolution.RES_4K || resolution == ExportResolution.RES_2K ->
+            ExportQuality.PRO_IPHONE_MASTER
+        else -> ExportQuality.FULL_HD_1080P
+    }
+
+    fun updateProClarity(enabled: Boolean) = updateProject { it.copy(proClarityEnabled = enabled) }
 
     // Subtitles & Auto-Captions
     fun toggleAutoCaptions(enabled: Boolean) = updateProject { it.copy(autoCaptionsEnabled = enabled) }
@@ -666,6 +828,54 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
     fun updateTransition(preset: TransitionPreset) = updateProject { it.copy(transitionPreset = preset) }
     fun updateTransitionDuration(sec: Float) = updateProject { it.copy(transitionDurationSec = sec.coerceIn(0.2f, 2.0f)) }
 
+    fun updateClipTransition(clipId: String, preset: TransitionPreset) {
+        updateProject { proj ->
+            proj.copy(
+                clips = proj.clips.map { clip ->
+                    if (clip.id == clipId) clip.copy(transitionAfter = preset) else clip
+                }
+            )
+        }
+    }
+
+    fun updateClipTransitionDuration(clipId: String, durationSec: Float) {
+        val clamped = durationSec.coerceIn(0.2f, 2.0f)
+        updateProject { proj ->
+            proj.copy(
+                clips = proj.clips.map { clip ->
+                    if (clip.id == clipId) clip.copy(transitionDurationSec = clamped) else clip
+                }
+            )
+        }
+    }
+
+    fun applyTransitionToAllClips(preset: TransitionPreset, durationSec: Float) {
+        val clamped = durationSec.coerceIn(0.2f, 2.0f)
+        updateProject { proj ->
+            proj.copy(
+                transitionPreset = preset,
+                transitionDurationSec = clamped,
+                clips = proj.clips.map { it.copy(transitionAfter = null, transitionDurationSec = null) }
+            )
+        }
+        val durLabel = if (preset == TransitionPreset.NONE) "" else " (${"%.1f".format(clamped)}s)"
+        _statusBanner.value = "Applied ${preset.displayName}$durLabel to all clip splices"
+    }
+
+    fun previewSpliceTransition(clipIndex: Int) {
+        val proj = _activeProject.value
+        if (proj.clips.size < 2) {
+            _statusBanner.value = "Add a 2nd clip to preview transitions between clips"
+            return
+        }
+        val safeIdx = clipIndex.coerceIn(0, proj.clips.lastIndex - 1)
+        val boundaryMs = proj.spliceBoundaryMs(safeIdx)
+        val transMs = (proj.resolvedTransitionDurationSec(safeIdx) * 1000f).toLong().coerceIn(200L, 2_000L)
+        val seekTargetMs = (boundaryMs - transMs - 450L).coerceAtLeast(0L)
+        _playheadMs.value = seekTargetMs
+        startPlayback()
+    }
+
     // Background Music
     fun selectMusicPreset(preset: MusicTrackPreset) {
         updateProject { it.copy(musicPreset = preset) }
@@ -677,7 +887,7 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
     }
 
     fun setCustomMusicAudio(uri: Uri, displayName: String) {
-        val context = getApplication<Application>()
+        val context = appContext
         runCatching {
             context.contentResolver.takePersistableUriPermission(
                 uri,
@@ -718,36 +928,78 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
         _isMusicPreviewing.value = false
     }
 
-    // Social Media Captions
+    // Social Media Captions & Viral Hashtag AI
+    fun selectProjectForCaptions(project: ClipProject) {
+        _activeProject.value = project
+        _socialCaptionState.value = SocialCaptionUiState.Idle
+    }
+
     fun updateSocialCaptions(bundle: SocialCaptionBundle) {
         updateProject { it.copy(socialCaptions = bundle) }
     }
 
-    fun regenerateSocialCaptions(tone: String) {
+    fun clearSocialCaptionError() {
+        if (_socialCaptionState.value is SocialCaptionUiState.Error) {
+            _socialCaptionState.value = SocialCaptionUiState.Idle
+        }
+    }
+
+    fun regenerateSocialCaptions(tone: String, extraContext: String = "") {
         val proj = _activeProject.value
         if (!connectivityObserver.isCurrentlyOnline()) {
-            _statusBanner.value = "Offline mode: edit captions directly, or connect online for Gemini AI rewrite"
+            val offlineMsg = "You're offline. Connect to the internet for Gemini AI video caption & hashtag generation, or edit captions manually below."
+            _socialCaptionState.value = SocialCaptionUiState.Error(offlineMsg)
+            _statusBanner.value = "Offline mode: connect online for Gemini AI captions"
             return
         }
         viewModelScope.launch {
             _isRegeneratingCaptions.value = true
+            _socialCaptionState.value = SocialCaptionUiState.Analyzing("Scanning video frames & timeline content…")
+            var extracted: com.example.media.ExtractedVideoFrames? = null
             try {
+                extracted = VideoFrameExtractor.extractFrames(appContext, proj)
+                val frameSummary = extracted.sourceSummary
+                _socialCaptionState.value = SocialCaptionUiState.Analyzing(
+                    if (extracted.bitmaps.isNotEmpty()) {
+                        "Gemini AI is analyzing $frameSummary & crafting viral copy…"
+                    } else {
+                        "Gemini AI is crafting viral captions & hashtags…"
+                    }
+                )
+
                 val contextScript = proj.subtitles.joinToString(" ") { it.text }
                     .ifBlank { proj.ttsSettings.script }
                     .ifBlank { proj.title }
+                val overlayTexts = proj.textOverlays.map { it.text.trim() }.filter { it.isNotBlank() }
+                val clipTitles = proj.clips.map { it.title.trim() }.filter { it.isNotBlank() }
+
                 val fresh = aiService.regenerateSocialCaptions(
                     projectTitle = proj.title,
                     subtitleContext = contextScript,
-                    tone = tone
+                    tone = tone,
+                    channelName = proj.channelName,
+                    clipTitles = clipTitles,
+                    overlayTexts = overlayTexts,
+                    durationSec = (proj.totalDurationMs / 1000L).toInt().coerceAtLeast(10),
+                    aspectRatioLabel = proj.aspectRatio.label,
+                    extraContext = extraContext.trim(),
+                    videoFrames = extracted.bitmaps
                 )
                 updateProject { it.copy(socialCaptions = fresh) }
-                _statusBanner.value = "Fresh $tone social captions generated!"
+                _socialCaptionState.value = SocialCaptionUiState.Success(
+                    sourceSummary = frameSummary,
+                    toneLabel = tone
+                )
+                _statusBanner.value = "Generated $tone captions & ${fresh.hashtags.size} hashtags from $frameSummary!"
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
                 Log.e(TAG, "Social caption regeneration failed", e)
-                _statusBanner.value = e.localizedMessage ?: "Failed to generate captions"
+                val errMsg = e.localizedMessage ?: "Failed to generate AI captions. Please try again."
+                _socialCaptionState.value = SocialCaptionUiState.Error(errMsg)
+                _statusBanner.value = errMsg
             } finally {
+                extracted?.recycleAll()
                 _isRegeneratingCaptions.value = false
             }
         }
@@ -867,6 +1119,10 @@ class ClipStudioViewModel(application: Application) : AndroidViewModel(applicati
         saveJob = viewModelScope.launch {
             delay(350L)
             repository.saveProject(project)
+            cloudRepository.upsertProject(currentUserId, project)
+                .onFailure { err ->
+                    Log.w(TAG, "Cloud backup deferred for ${project.id}: ${err.message}")
+                }
         }
     }
 

@@ -33,6 +33,10 @@ class ProjectRepository(private val projectDao: ProjectDao) {
         coverThumbnailUrl = coverThumbnailUrl,
         aspectRatioName = aspectRatio.name,
         exportQualityName = exportQuality.name,
+        exportResolutionName = exportResolution.name,
+        exportBitrateTierName = exportBitrateTier.name,
+        exportFps = exportFps,
+        proClarityEnabled = proClarityEnabled,
         targetLengthSec = targetLengthSec,
         clipsJson = serializeClips(clips),
         autoCaptionsEnabled = autoCaptionsEnabled,
@@ -64,10 +68,16 @@ class ProjectRepository(private val projectDao: ProjectDao) {
         youtubeVideoId = youtubeVideoId,
         channelName = channelName,
         coverThumbnailUrl = coverThumbnailUrl,
-        aspectRatio = runCatching { AspectRatioPreset.valueOf(aspectRatioName) }
-            .getOrDefault(AspectRatioPreset.RATIO_19_6),
-        exportQuality = runCatching { ExportQuality.valueOf(exportQualityName) }
-            .getOrDefault(ExportQuality.FULL_HD_1080P),
+        aspectRatio = enumValues<AspectRatioPreset>().firstOrNull { it.name == aspectRatioName }
+            ?: AspectRatioPreset.RATIO_19_6,
+        exportQuality = enumValues<ExportQuality>().firstOrNull { it.name == exportQualityName }
+            ?: ExportQuality.PRO_IPHONE_MASTER,
+        exportResolution = enumValues<ExportResolution>().firstOrNull { it.name == exportResolutionName }
+            ?: ExportResolution.RES_1080P,
+        exportBitrateTier = enumValues<ExportBitrateTier>().firstOrNull { it.name == exportBitrateTierName }
+            ?: ExportBitrateTier.MASTER,
+        exportFps = if (exportFps >= 60) 60 else 30,
+        proClarityEnabled = proClarityEnabled,
         targetLengthSec = targetLengthSec,
         clips = deserializeClips(clipsJson),
         autoCaptionsEnabled = autoCaptionsEnabled,
@@ -114,6 +124,12 @@ class ProjectRepository(private val projectDao: ProjectDao) {
                     put("hookReason", c.hookReason)
                     put("youtubeStartLabel", c.youtubeStartLabel)
                     put("youtubeEndLabel", c.youtubeEndLabel)
+                    if (c.transitionAfter != null) {
+                        put("transitionAfter", c.transitionAfter.name)
+                    }
+                    if (c.transitionDurationSec != null) {
+                        put("transitionDurationSec", c.transitionDurationSec.toDouble())
+                    }
                 }
             )
         }
@@ -126,6 +142,13 @@ class ProjectRepository(private val projectDao: ProjectDao) {
             val arr = JSONArray(json)
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
+                val transitionName = o.optString("transitionAfter").takeIf { it.isNotBlank() }
+                val parsedTransition = transitionName?.let { name ->
+                    enumValues<TransitionPreset>().firstOrNull { it.name == name }
+                }
+                val parsedTransitionDur = if (o.has("transitionDurationSec") && !o.isNull("transitionDurationSec")) {
+                    o.optDouble("transitionDurationSec").toFloat().coerceIn(0.2f, 2.0f)
+                } else null
                 result.add(
                     TimelineClipItem(
                         id = o.optString("id"),
@@ -141,7 +164,9 @@ class ProjectRepository(private val projectDao: ProjectDao) {
                         viralScore = o.optInt("viralScore", 90),
                         hookReason = o.optString("hookReason"),
                         youtubeStartLabel = o.optString("youtubeStartLabel", "00:00"),
-                        youtubeEndLabel = o.optString("youtubeEndLabel", "00:30")
+                        youtubeEndLabel = o.optString("youtubeEndLabel", "00:30"),
+                        transitionAfter = parsedTransition,
+                        transitionDurationSec = parsedTransitionDur
                     )
                 )
             }
@@ -256,6 +281,11 @@ class ProjectRepository(private val projectDao: ProjectDao) {
 
     private fun serializeSocial(bundle: SocialCaptionBundle): String = JSONObject().apply {
         put("viralHook", bundle.viralHook)
+        val hooks = JSONArray()
+        bundle.alternateHooks.forEach { hooks.put(it) }
+        put("alternateHooks", hooks)
+        put("visualInsight", bundle.visualInsight)
+        put("generatedTone", bundle.generatedTone)
         put("instagramCaption", bundle.instagramCaption)
         put("youtubeShortsCaption", bundle.youtubeShortsCaption)
         put("tiktokCaption", bundle.tiktokCaption)
@@ -268,9 +298,14 @@ class ProjectRepository(private val projectDao: ProjectDao) {
     private fun deserializeSocial(json: String): SocialCaptionBundle = runCatching {
         val o = JSONObject(json)
         val tagsArr = o.optJSONArray("hashtags") ?: JSONArray()
-        val tags = (0 until tagsArr.length()).map { tagsArr.getString(it) }
+        val tags = (0 until tagsArr.length()).mapNotNull { tagsArr.optString(it).takeIf { s -> s.isNotBlank() } }
+        val hooksArr = o.optJSONArray("alternateHooks") ?: JSONArray()
+        val hooks = (0 until hooksArr.length()).mapNotNull { hooksArr.optString(it).takeIf { s -> s.isNotBlank() } }
         SocialCaptionBundle(
             viralHook = o.optString("viralHook"),
+            alternateHooks = hooks,
+            visualInsight = o.optString("visualInsight"),
+            generatedTone = o.optString("generatedTone"),
             instagramCaption = o.optString("instagramCaption"),
             youtubeShortsCaption = o.optString("youtubeShortsCaption"),
             tiktokCaption = o.optString("tiktokCaption"),

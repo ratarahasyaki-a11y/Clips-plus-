@@ -11,6 +11,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -43,13 +44,16 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import com.example.R
+import com.example.media.QuickShareTarget
 import com.example.media.TtsLanguageOption
 import com.example.media.VideoFilterRenderer
 import com.example.model.*
+import com.example.ui.components.ViralCaptionStudioContent
 import com.example.ui.components.formatDurationShort
 import com.example.ui.components.formatTimecode
 import com.example.ui.theme.*
 import com.example.viewmodel.EditorToolTab
+import com.example.viewmodel.SocialCaptionUiState
 import kotlin.math.PI
 import kotlin.math.abs
 import kotlin.math.sin
@@ -64,6 +68,8 @@ fun StudioEditorScreen(
     isMusicPreviewing: Boolean,
     isTtsPreviewing: Boolean,
     isGeneratingAutoCaptions: Boolean,
+    isRegeneratingSocialCaptions: Boolean,
+    socialCaptionState: SocialCaptionUiState,
     ttsLanguages: List<TtsLanguageOption>,
     snackbarHostState: SnackbarHostState,
     onBack: () -> Unit,
@@ -102,15 +108,26 @@ fun StudioEditorScreen(
     onEffectIntensityChange: (Float) -> Unit,
     onSelectTransition: (TransitionPreset) -> Unit,
     onTransitionDurationChange: (Float) -> Unit,
+    onUpdateClipTransition: (String, TransitionPreset) -> Unit,
+    onUpdateClipTransitionDuration: (String, Float) -> Unit,
+    onApplyTransitionToAll: (TransitionPreset, Float) -> Unit,
+    onPreviewSpliceTransition: (Int) -> Unit,
     onSelectMusicPreset: (MusicTrackPreset) -> Unit,
     onToggleMusicPreview: () -> Unit,
     onPickCustomAudio: () -> Unit,
-    onMusicVolumeChange: (Float) -> Unit
+    onMusicVolumeChange: (Float) -> Unit,
+    onUpdateSocialCaptions: (SocialCaptionBundle) -> Unit,
+    onGenerateSocialCaptions: (String, String) -> Unit,
+    onDismissSocialCaptionError: () -> Unit,
+    onQuickShareCaptionText: (String) -> Unit,
+    onQuickShareCaptionTarget: (QuickShareTarget, String) -> Unit,
+    onCopiedFeedback: (String) -> Unit
 ) {
     BackHandler { onBack() }
 
     var showTitleDialog by remember { mutableStateOf(false) }
     var draftTitle by remember(project.title) { mutableStateOf(project.title) }
+    var activeSpliceSheetIndex by remember { mutableStateOf<Int?>(null) }
 
     Scaffold(
         containerColor = ObsidianBg,
@@ -178,11 +195,33 @@ fun StudioEditorScreen(
                         style = MaterialTheme.typography.labelSmall,
                         color = AcidLime,
                         fontWeight = FontWeight.Bold,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp)
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
                     )
                 }
 
-                Spacer(Modifier.width(8.dp))
+                Spacer(Modifier.width(6.dp))
+
+                // Quick Resolution & Bitrate Menu Badge
+                Surface(
+                    modifier = Modifier
+                        .defaultMinSize(minHeight = 40.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { onOpenExportSheet() }
+                        .testTag("editor_quality_badge"),
+                    shape = RoundedCornerShape(10.dp),
+                    color = CyanContainer,
+                    border = BorderStroke(1.dp, CyanWave.copy(alpha = 0.65f))
+                ) {
+                    Text(
+                        text = "${project.exportResolution.shortLabel}·${project.exportFps}",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyanWave,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 8.dp)
+                    )
+                }
+
+                Spacer(Modifier.width(6.dp))
 
                 Button(
                     onClick = onOpenExportSheet,
@@ -190,7 +229,7 @@ fun StudioEditorScreen(
                         .height(42.dp)
                         .testTag("editor_export_button"),
                     shape = RoundedCornerShape(12.dp),
-                    contentPadding = PaddingValues(horizontal = 14.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = CoralPulse, contentColor = OnCoral)
                 ) {
                     Icon(Icons.Rounded.FileUpload, contentDescription = null, modifier = Modifier.size(18.dp))
@@ -307,16 +346,39 @@ fun StudioEditorScreen(
                                 )
                             }
                             if (idx < project.clips.lastIndex) {
+                                val splicePreset = project.resolvedTransitionAfter(idx)
+                                val isCustomSplice = clip.transitionAfter != null || clip.transitionDurationSec != null
                                 Surface(
-                                    shape = RoundedCornerShape(6.dp),
-                                    color = CyanContainer
-                                ) {
-                                    Text(
-                                        text = project.transitionPreset.shortLabel,
-                                        style = MaterialTheme.typography.labelSmall,
-                                        color = CyanWave,
-                                        modifier = Modifier.padding(horizontal = 5.dp, vertical = 2.dp)
+                                    modifier = Modifier
+                                        .defaultMinSize(minHeight = 36.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .clickable { activeSpliceSheetIndex = idx }
+                                        .testTag("ribbon_splice_transition_$idx"),
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = if (splicePreset == TransitionPreset.NONE) SurfaceCard else CyanContainer,
+                                    border = BorderStroke(
+                                        width = if (isCustomSplice) 1.5.dp else 1.dp,
+                                        color = if (splicePreset == TransitionPreset.NONE) OutlineHairline else CyanWave.copy(alpha = 0.8f)
                                     )
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 5.dp),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.spacedBy(4.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = transitionPresetIcon(splicePreset),
+                                            contentDescription = stringResource(R.string.cd_edit_splice_transition),
+                                            tint = if (splicePreset == TransitionPreset.NONE) InkSecondary else CyanWave,
+                                            modifier = Modifier.size(13.dp)
+                                        )
+                                        Text(
+                                            text = splicePreset.shortLabel,
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = if (splicePreset == TransitionPreset.NONE) InkSecondary else CyanWave,
+                                            fontWeight = FontWeight.SemiBold
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -355,6 +417,7 @@ fun StudioEditorScreen(
                     val icon = when (tab) {
                         EditorToolTab.CLIPS -> Icons.Rounded.VideoLibrary
                         EditorToolTab.CAPTIONS -> Icons.Rounded.ClosedCaption
+                        EditorToolTab.AI_POST -> Icons.Rounded.AutoAwesome
                         EditorToolTab.TEXT -> Icons.Rounded.TextFields
                         EditorToolTab.TTS -> Icons.Rounded.RecordVoiceOver
                         EditorToolTab.FILTERS -> Icons.Rounded.ColorLens
@@ -414,7 +477,9 @@ fun StudioEditorScreen(
                         onApplyProjectLength = onApplyProjectLength,
                         onUpdateClipDuration = onUpdateClipDuration,
                         onMoveClip = onMoveClip,
-                        onRemoveClip = onRemoveClip
+                        onRemoveClip = onRemoveClip,
+                        onOpenSpliceTransition = { idx -> activeSpliceSheetIndex = idx },
+                        onPreviewSplice = onPreviewSpliceTransition
                     )
                     EditorToolTab.CAPTIONS -> CaptionsToolPanel(
                         project = project,
@@ -428,6 +493,19 @@ fun StudioEditorScreen(
                         onAddCue = onAddSubtitleCue,
                         onUpdateCue = onUpdateSubtitleCue,
                         onDeleteCue = onDeleteSubtitleCue
+                    )
+                    EditorToolTab.AI_POST -> ViralCaptionStudioContent(
+                        project = project,
+                        isOnline = isOnline,
+                        isRegenerating = isRegeneratingSocialCaptions,
+                        captionState = socialCaptionState,
+                        onUpdateBundle = onUpdateSocialCaptions,
+                        onGenerateAi = onGenerateSocialCaptions,
+                        onDismissError = onDismissSocialCaptionError,
+                        onQuickShareText = onQuickShareCaptionText,
+                        onQuickShareTarget = onQuickShareCaptionTarget,
+                        onCopiedFeedback = onCopiedFeedback,
+                        compactMode = true
                     )
                     EditorToolTab.TEXT -> TextOverlayToolPanel(
                         project = project,
@@ -457,11 +535,14 @@ fun StudioEditorScreen(
                         onIntensityChange = onEffectIntensityChange
                     )
                     EditorToolTab.TRANSITIONS -> TransitionsToolPanel(
-                        selectedTransition = project.transitionPreset,
-                        durationSec = project.transitionDurationSec,
-                        clipCount = project.clips.size,
-                        onSelectTransition = onSelectTransition,
-                        onDurationChange = onTransitionDurationChange
+                        project = project,
+                        onSelectGlobalTransition = onSelectTransition,
+                        onGlobalDurationChange = onTransitionDurationChange,
+                        onSelectClipTransition = onUpdateClipTransition,
+                        onClipDurationChange = onUpdateClipTransitionDuration,
+                        onApplyToAll = onApplyTransitionToAll,
+                        onPreviewSplice = onPreviewSpliceTransition,
+                        onAddSecondClip = onAddLocalVideo
                     )
                     EditorToolTab.MUSIC -> MusicToolPanel(
                         selectedPreset = project.musicPreset,
@@ -505,6 +586,19 @@ fun StudioEditorScreen(
             }
         )
     }
+
+    val spliceIdx = activeSpliceSheetIndex
+    if (spliceIdx != null && spliceIdx in 0 until project.clips.lastIndex) {
+        SpliceTransitionSelectorSheet(
+            project = project,
+            spliceIndex = spliceIdx,
+            onDismiss = { activeSpliceSheetIndex = null },
+            onSelectTransition = onUpdateClipTransition,
+            onDurationChange = onUpdateClipTransitionDuration,
+            onApplyToAll = onApplyTransitionToAll,
+            onPreviewSplice = onPreviewSpliceTransition
+        )
+    }
 }
 
 @Composable
@@ -516,19 +610,25 @@ private fun LiveStudioPreviewViewport(
     var viewportSize by remember { mutableStateOf(IntSize(1, 1)) }
     val timeSec = playheadMs / 1000f
 
-    // Determine active clip and transition progress
+    // Determine active clip, incoming next clip, and per-splice transition progress
     val clips = project.clips
+    var activeIdx = 0
     var activeClip: TimelineClipItem? = clips.firstOrNull()
+    var nextClip: TimelineClipItem? = null
+    var activeTransition = project.transitionPreset
     var transitionProgress = 0f
-    val transMs = (project.transitionDurationSec * 1000f).toLong().coerceIn(200L, 2_000L)
     var acc = 0L
     for (i in clips.indices) {
         val end = acc + clips[i].effectiveDurationMs
         if (playheadMs < end || i == clips.lastIndex) {
+            activeIdx = i
             activeClip = clips[i]
+            nextClip = clips.getOrNull(i + 1)
+            activeTransition = project.resolvedTransitionAfter(i)
+            val transMs = (project.resolvedTransitionDurationSec(i) * 1000f).toLong().coerceIn(200L, 2_000L)
             val remaining = (end - playheadMs).coerceAtLeast(0L)
-            if (i < clips.lastIndex && remaining < transMs) {
-                transitionProgress = 1f - (remaining.toFloat() / transMs.toFloat())
+            if (nextClip != null && activeTransition != TransitionPreset.NONE && remaining < transMs) {
+                transitionProgress = (1f - (remaining.toFloat() / transMs.toFloat())).coerceIn(0f, 1f)
             }
             break
         }
@@ -536,6 +636,8 @@ private fun LiveStudioPreviewViewport(
     }
 
     val previewModel = activeClip?.thumbnailUrl?.ifBlank { project.coverThumbnailUrl }
+        ?: project.coverThumbnailUrl
+    val nextPreviewModel = nextClip?.thumbnailUrl?.ifBlank { project.coverThumbnailUrl }
         ?: project.coverThumbnailUrl
 
     val colorMatrixFilter = remember(project.filterPreset, project.filterIntensity) {
@@ -558,12 +660,10 @@ private fun LiveStudioPreviewViewport(
     val shakeX = if (project.effectPreset == VideoEffectPreset.KINETIC_SHAKE) sin(timeSec * 38f) * 8f * effectAmt else 0f
     val shakeY = if (project.effectPreset == VideoEffectPreset.KINETIC_SHAKE) sin(timeSec * 47f) * 6f * effectAmt else 0f
 
-    val transAlpha = if (project.transitionPreset == TransitionPreset.CROSSFADE && transitionProgress > 0f) {
-        1f - transitionProgress * 0.65f
-    } else 1f
-    val transSlideX = if (project.transitionPreset == TransitionPreset.SLIDE_LEFT && transitionProgress > 0f) {
-        -viewportSize.width * transitionProgress * 0.35f
-    } else 0f
+    val isTransitioning = transitionProgress > 0f && nextClip != null && activeTransition != TransitionPreset.NONE
+    val p = transitionProgress
+    val vpW = viewportSize.width.toFloat().coerceAtLeast(1f)
+    val vpH = viewportSize.height.toFloat().coerceAtLeast(1f)
 
     Box(
         modifier = Modifier
@@ -575,35 +675,215 @@ private fun LiveStudioPreviewViewport(
             .onSizeChanged { viewportSize = it }
             .testTag("studio_preview_viewport")
     ) {
-        if (previewModel.isNotBlank()) {
-            AsyncImage(
+        @Composable
+        fun PreviewClipFrame(
+            model: String,
+            clipIndex: Int,
+            modifier: Modifier
+        ) {
+            if (model.isNotBlank()) {
+                AsyncImage(
+                    model = model,
+                    contentDescription = "Live video preview",
+                    contentScale = ContentScale.Crop,
+                    colorFilter = colorMatrixFilter,
+                    modifier = modifier
+                )
+            } else {
+                val gradColors = if (clipIndex % 2 == 0) {
+                    listOf(SurfaceElevated, CoralContainer.copy(alpha = 0.75f), CyanContainer.copy(alpha = 0.75f))
+                } else {
+                    listOf(SurfaceElevated, CyanContainer.copy(alpha = 0.85f), AcidLimeContainer.copy(alpha = 0.75f))
+                }
+                Box(
+                    modifier = modifier.background(Brush.linearGradient(gradColors))
+                )
+            }
+        }
+
+        if (!isTransitioning) {
+            PreviewClipFrame(
                 model = previewModel,
-                contentDescription = "Live video preview",
-                contentScale = ContentScale.Crop,
-                colorFilter = colorMatrixFilter,
+                clipIndex = activeIdx,
                 modifier = Modifier
                     .fillMaxSize()
                     .graphicsLayer {
                         scaleX = dynScale
                         scaleY = dynScale
-                        translationX = shakeX + transSlideX
+                        translationX = shakeX
                         translationY = shakeY
-                        alpha = transAlpha
                     }
             )
         } else {
-            Box(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .background(
-                        Brush.linearGradient(
-                            listOf(SurfaceElevated, CoralContainer.copy(alpha = 0.7f), CyanContainer.copy(alpha = 0.7f))
-                        )
+            when (activeTransition) {
+                TransitionPreset.CROSSFADE -> {
+                    PreviewClipFrame(
+                        model = previewModel,
+                        clipIndex = activeIdx,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                                alpha = 1f - p
+                            }
                     )
-            )
+                    PreviewClipFrame(
+                        model = nextPreviewModel,
+                        clipIndex = activeIdx + 1,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                                alpha = p
+                            }
+                    )
+                }
+                TransitionPreset.SLIDE_LEFT -> {
+                    PreviewClipFrame(
+                        model = previewModel,
+                        clipIndex = activeIdx,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                                translationX = -vpW * p
+                            }
+                    )
+                    PreviewClipFrame(
+                        model = nextPreviewModel,
+                        clipIndex = activeIdx + 1,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                                translationX = vpW * (1f - p)
+                            }
+                    )
+                }
+                TransitionPreset.SLIDE_UP -> {
+                    PreviewClipFrame(
+                        model = previewModel,
+                        clipIndex = activeIdx,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                                translationY = -vpH * p
+                            }
+                    )
+                    PreviewClipFrame(
+                        model = nextPreviewModel,
+                        clipIndex = activeIdx + 1,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                                translationY = vpH * (1f - p)
+                            }
+                    )
+                }
+                TransitionPreset.ZOOM_IN -> {
+                    val outScale = dynScale + p * 0.45f
+                    val inScale = (dynScale * 0.85f) + p * 0.18f
+                    PreviewClipFrame(
+                        model = previewModel,
+                        clipIndex = activeIdx,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = outScale
+                                scaleY = outScale
+                                alpha = 1f - p
+                            }
+                    )
+                    PreviewClipFrame(
+                        model = nextPreviewModel,
+                        clipIndex = activeIdx + 1,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = inScale
+                                scaleY = inScale
+                                alpha = p
+                            }
+                    )
+                }
+                TransitionPreset.FLASH_WHITE -> {
+                    val showNext = p >= 0.5f
+                    PreviewClipFrame(
+                        model = if (showNext) nextPreviewModel else previewModel,
+                        clipIndex = if (showNext) activeIdx + 1 else activeIdx,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                            }
+                    )
+                }
+                TransitionPreset.GLITCH_CUT -> {
+                    val showNext = p >= 0.5f
+                    val jitter = sin(p * 45f) * 18f
+                    PreviewClipFrame(
+                        model = if (showNext) nextPreviewModel else previewModel,
+                        clipIndex = if (showNext) activeIdx + 1 else activeIdx,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                                translationX = jitter
+                            }
+                    )
+                }
+                TransitionPreset.WIPE_RIGHT -> {
+                    val wipeShape = GenericShape { size, _ ->
+                        moveTo(0f, 0f)
+                        lineTo(size.width * p, 0f)
+                        lineTo(size.width * p, size.height)
+                        lineTo(0f, size.height)
+                        close()
+                    }
+                    PreviewClipFrame(
+                        model = previewModel,
+                        clipIndex = activeIdx,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                scaleX = dynScale
+                                scaleY = dynScale
+                            }
+                    )
+                    PreviewClipFrame(
+                        model = nextPreviewModel,
+                        clipIndex = activeIdx + 1,
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .graphicsLayer {
+                                clip = true
+                                shape = wipeShape
+                                scaleX = dynScale
+                                scaleY = dynScale
+                            }
+                    )
+                }
+                TransitionPreset.NONE -> {
+                    PreviewClipFrame(
+                        model = previewModel,
+                        clipIndex = activeIdx,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+            }
         }
 
-        // Live Video Effects & Flash Transition Canvas Overlay
+        // Live Video Effects & Transition Canvas Overlay (Flash & Glitch Bars)
         Canvas(modifier = Modifier.fillMaxSize()) {
             when (project.effectPreset) {
                 VideoEffectPreset.VIGNETTE -> {
@@ -640,9 +920,14 @@ private fun LiveStudioPreviewViewport(
                 else -> Unit
             }
 
-            if (transitionProgress > 0f && project.transitionPreset == TransitionPreset.FLASH_WHITE) {
-                val flash = sin(transitionProgress * PI.toFloat()).coerceIn(0f, 1f)
-                drawRect(Color.White.copy(alpha = flash * 0.85f))
+            if (isTransitioning && activeTransition == TransitionPreset.FLASH_WHITE) {
+                val flash = sin(p * PI.toFloat()).coerceIn(0f, 1f)
+                drawRect(Color.White.copy(alpha = flash * 0.88f))
+            }
+            if (isTransitioning && activeTransition == TransitionPreset.GLITCH_CUT) {
+                val y = size.height * p
+                drawRect(CyanWave.copy(alpha = 0.55f), Offset(0f, y), Size(size.width, size.height * 0.07f))
+                drawRect(CoralPulse.copy(alpha = 0.55f), Offset(0f, size.height - y), Size(size.width, size.height * 0.05f))
             }
         }
 
@@ -729,6 +1014,37 @@ private fun LiveStudioPreviewViewport(
                 color = InkPrimary,
                 modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
             )
+        }
+
+        // Top-right Live Transition Indicator Pill when crossing a splice
+        if (isTransitioning) {
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp),
+                shape = RoundedCornerShape(6.dp),
+                color = CyanContainer.copy(alpha = 0.92f),
+                border = BorderStroke(1.dp, CyanWave)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Icon(
+                        imageVector = transitionPresetIcon(activeTransition),
+                        contentDescription = null,
+                        tint = CyanWave,
+                        modifier = Modifier.size(12.dp)
+                    )
+                    Text(
+                        text = activeTransition.displayName,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = CyanWave,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+            }
         }
     }
 }

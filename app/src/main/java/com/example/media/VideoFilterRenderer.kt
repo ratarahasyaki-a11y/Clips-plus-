@@ -27,6 +27,14 @@ import kotlin.math.sin
 
 object VideoFilterRenderer {
 
+    // Subtle iPhone Smart-HDR style clarity: gentle S-curve micro-contrast + clean skin-safe vibrance
+    private val PRO_CLARITY_MATRIX = floatArrayOf(
+        1.09f, -0.02f, -0.02f, 0f, -4f,
+        -0.02f, 1.09f, -0.02f, 0f, -4f,
+        -0.02f, -0.02f, 1.11f, 0f, -3f,
+        0f, 0f, 0f, 1f, 0f
+    )
+
     fun blendedColorMatrix(preset: VideoFilterPreset, intensity: Float): FloatArray {
         val t = intensity.coerceIn(0f, 1f)
         val identity = VideoFilterPreset.ORIGINAL.matrix
@@ -44,15 +52,28 @@ object VideoFilterRenderer {
         timeMs: Long,
         currentBitmap: Bitmap?,
         nextBitmap: Bitmap?,
-        transitionProgress: Float // 0f = normal, >0f..1f = transitioning into nextBitmap
+        transitionProgress: Float, // 0f = normal, >0f..1f = transitioning into nextBitmap
+        transitionPreset: TransitionPreset = project.transitionPreset
     ) {
         canvas.drawColor(Color.rgb(11, 12, 16))
 
-        val filterPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG).apply {
+        val filterPaint = Paint(
+            Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG or Paint.DITHER_FLAG
+        ).apply {
+            val combinedMatrix = ColorMatrix()
+            var hasColorGrading = false
+            if (project.proClarityEnabled) {
+                combinedMatrix.postConcat(ColorMatrix(PRO_CLARITY_MATRIX))
+                hasColorGrading = true
+            }
             if (project.filterPreset != VideoFilterPreset.ORIGINAL && project.filterIntensity > 0.01f) {
-                colorFilter = ColorMatrixColorFilter(
+                combinedMatrix.postConcat(
                     ColorMatrix(blendedColorMatrix(project.filterPreset, project.filterIntensity))
                 )
+                hasColorGrading = true
+            }
+            if (hasColorGrading) {
+                colorFilter = ColorMatrixColorFilter(combinedMatrix)
             }
         }
 
@@ -78,7 +99,7 @@ object VideoFilterRenderer {
             else -> Unit
         }
 
-        if (transitionProgress <= 0f || nextBitmap == null || project.transitionPreset == TransitionPreset.NONE) {
+        if (transitionProgress <= 0f || nextBitmap == null || transitionPreset == TransitionPreset.NONE) {
             drawScaledFrame(canvas, currentBitmap, width, height, filterPaint, zoomScale, offsetX, offsetY)
         } else {
             drawTransitionFrames(
@@ -87,7 +108,7 @@ object VideoFilterRenderer {
                 height = height,
                 fromBmp = currentBitmap,
                 toBmp = nextBitmap,
-                preset = project.transitionPreset,
+                preset = transitionPreset,
                 progress = transitionProgress.coerceIn(0f, 1f),
                 paint = filterPaint,
                 zoomScale = zoomScale
@@ -304,7 +325,9 @@ object VideoFilterRenderer {
             overlay.text
         }
 
-        val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val textPaint = Paint(
+            Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG
+        ).apply {
             color = overlay.textColorArgb
             textSize = textSizePx
             textAlign = Paint.Align.CENTER
@@ -360,7 +383,9 @@ object VideoFilterRenderer {
 
         val scaleFactor = min(width, height) / 380f
         val textSizePx = (fontSizeSp * scaleFactor).coerceIn(20f, 84f)
-        val basePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        val basePaint = Paint(
+            Paint.ANTI_ALIAS_FLAG or Paint.SUBPIXEL_TEXT_FLAG or Paint.LINEAR_TEXT_FLAG
+        ).apply {
             textSize = textSizePx
             typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
             setShadowLayer(8f, 0f, 4f, Color.argb(210, 0, 0, 0))

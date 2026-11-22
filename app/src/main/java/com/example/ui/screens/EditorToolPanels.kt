@@ -40,7 +40,9 @@ fun ClipsToolPanel(
     onApplyProjectLength: (Int) -> Unit,
     onUpdateClipDuration: (String, Int) -> Unit,
     onMoveClip: (Int, Int) -> Unit,
-    onRemoveClip: (String) -> Unit
+    onRemoveClip: (String) -> Unit,
+    onOpenSpliceTransition: (Int) -> Unit,
+    onPreviewSplice: (Int) -> Unit
 ) {
     var showSegmentDialog by remember { mutableStateOf(false) }
     var segmentTitle by remember { mutableStateOf("Bonus Viral Cut") }
@@ -206,6 +208,94 @@ fun ClipsToolPanel(
                             color = AcidLime
                         )
                     }
+                }
+            }
+
+            // Interactive Splice Transition Connector between clip #idx and clip #(idx+1)
+            if (idx < project.clips.lastIndex) {
+                val activeTransition = project.resolvedTransitionAfter(idx)
+                val activeDur = project.resolvedTransitionDurationSec(idx)
+                val isCustom = clip.transitionAfter != null || clip.transitionDurationSec != null
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    HorizontalDivider(
+                        modifier = Modifier.weight(0.3f),
+                        color = CyanWave.copy(alpha = 0.35f)
+                    )
+                    Surface(
+                        modifier = Modifier
+                            .defaultMinSize(minHeight = 48.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .clickable { onOpenSpliceTransition(idx) }
+                            .testTag("clips_splice_transition_$idx"),
+                        shape = RoundedCornerShape(14.dp),
+                        color = if (activeTransition == TransitionPreset.NONE) SurfaceCard else CyanContainer,
+                        border = BorderStroke(
+                            width = if (isCustom) 1.5.dp else 1.dp,
+                            color = if (activeTransition == TransitionPreset.NONE) OutlineHairline else CyanWave.copy(alpha = 0.75f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Icon(
+                                imageVector = transitionPresetIcon(activeTransition),
+                                contentDescription = "Select transition between clip ${idx + 1} and clip ${idx + 2}",
+                                tint = if (activeTransition == TransitionPreset.NONE) InkSecondary else CyanWave,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Column {
+                                Text(
+                                    text = if (activeTransition == TransitionPreset.NONE) {
+                                        "Hard Cut · Tap to add transition"
+                                    } else {
+                                        "${activeTransition.displayName} · ${"%.1f".format(activeDur)}s"
+                                    },
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = if (activeTransition == TransitionPreset.NONE) InkPrimary else CyanWave,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                                Text(
+                                    text = "Between #${idx + 1} & #${idx + 2}${if (isCustom) " · Custom" else ""}",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = InkSecondary
+                                )
+                            }
+                            Icon(
+                                imageVector = Icons.Rounded.Tune,
+                                contentDescription = null,
+                                tint = InkSecondary,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { onPreviewSplice(idx) },
+                        modifier = Modifier
+                            .size(48.dp)
+                            .clip(CircleShape)
+                            .background(SurfaceElevated)
+                            .border(1.dp, CyanWave.copy(alpha = 0.5f), CircleShape)
+                            .testTag("clips_preview_splice_$idx")
+                    ) {
+                        Icon(
+                            imageVector = Icons.Rounded.PlayArrow,
+                            contentDescription = "Preview transition between clip ${idx + 1} and clip ${idx + 2}",
+                            tint = CyanWave,
+                            modifier = Modifier.size(20.dp)
+                        )
+                    }
+                    HorizontalDivider(
+                        modifier = Modifier.weight(0.3f),
+                        color = CyanWave.copy(alpha = 0.35f)
+                    )
                 }
             }
         }

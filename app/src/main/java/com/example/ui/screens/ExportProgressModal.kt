@@ -31,10 +31,15 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.ui.platform.LocalContext
 import com.example.R
 import com.example.media.ExportStage
+import com.example.media.QuickShareCoordinator
 import com.example.media.QuickShareTarget
 import com.example.model.ClipProject
+import com.example.model.SocialPlatformTab
 import com.example.ui.components.QuickShareTargetStrip
 import com.example.ui.components.formatDurationShort
 import com.example.ui.theme.*
@@ -45,11 +50,14 @@ import kotlinx.coroutines.delay
 fun ExportProgressModal(
     project: ClipProject,
     exportState: ExportUiState,
+    isGeneratingSocialCaptions: Boolean,
     onCancelExport: () -> Unit,
     onRetryExport: () -> Unit,
     onDismiss: () -> Unit,
     onQuickShareTarget: (Uri, QuickShareTarget) -> Unit,
-    onOpenInGallery: (Uri) -> Unit
+    onOpenInGallery: (Uri) -> Unit,
+    onGenerateAiCaptions: () -> Unit,
+    onCopiedFeedback: (String) -> Unit
 ) {
     if (exportState is ExportUiState.Idle) return
 
@@ -87,6 +95,7 @@ fun ExportProgressModal(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
+                    .verticalScroll(rememberScrollState())
                     .padding(horizontal = 22.dp, vertical = 22.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp)
@@ -99,10 +108,14 @@ fun ExportProgressModal(
                     )
 
                     is ExportUiState.Completed -> CompletedModalContent(
+                        project = project,
                         state = exportState,
+                        isGeneratingSocialCaptions = isGeneratingSocialCaptions,
                         onDismiss = onDismiss,
                         onQuickShareTarget = onQuickShareTarget,
-                        onOpenInGallery = onOpenInGallery
+                        onOpenInGallery = onOpenInGallery,
+                        onGenerateAiCaptions = onGenerateAiCaptions,
+                        onCopiedFeedback = onCopiedFeedback
                     )
 
                     is ExportUiState.Error -> ErrorModalContent(
@@ -164,8 +177,8 @@ private fun ExportingModalContent(
         verticalAlignment = Alignment.CenterVertically
     ) {
         ExportSpecPill(project.aspectRatio.label, CoralContainer, CoralPulse)
-        ExportSpecPill(project.exportQuality.label, CyanContainer, CyanWave)
-        ExportSpecPill(formatDurationShort((project.totalDurationMs / 1000L).toInt()), AcidLimeContainer, AcidLime)
+        ExportSpecPill("${project.exportResolution.shortLabel} · ${project.exportFps}fps", CyanContainer, CyanWave)
+        ExportSpecPill("${project.resolvedExportBitrateMbps()} Mbps", AcidLimeContainer, AcidLime)
     }
 
     // Circular Progress Ring Gauge
@@ -352,12 +365,28 @@ private fun ExportingModalContent(
 
 @Composable
 private fun CompletedModalContent(
+    project: ClipProject,
     state: ExportUiState.Completed,
+    isGeneratingSocialCaptions: Boolean,
     onDismiss: () -> Unit,
     onQuickShareTarget: (Uri, QuickShareTarget) -> Unit,
-    onOpenInGallery: (Uri) -> Unit
+    onOpenInGallery: (Uri) -> Unit,
+    onGenerateAiCaptions: () -> Unit,
+    onCopiedFeedback: (String) -> Unit
 ) {
+    val context = LocalContext.current
+    var copiedPost by remember { mutableStateOf(false) }
+    LaunchedEffect(copiedPost) {
+        if (copiedPost) {
+            delay(1_800L)
+            copiedPost = false
+        }
+    }
     val res = state.result
+    val postPayload = project.socialCaptions.buildFullPost(
+        platform = SocialPlatformTab.INSTAGRAM,
+        fallbackTitle = project.title
+    )
     Box(
         modifier = Modifier
             .size(68.dp)
@@ -423,6 +452,118 @@ private fun CompletedModalContent(
         Icon(Icons.Rounded.VideoLibrary, contentDescription = null, modifier = Modifier.size(18.dp))
         Spacer(Modifier.width(8.dp))
         Text(stringResource(R.string.action_open_gallery), style = MaterialTheme.typography.labelLarge)
+    }
+
+    // Viral Caption & Hashtags Quick-Copy Card
+    Surface(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        color = SurfaceDark,
+        border = BorderStroke(1.dp, AcidLime.copy(alpha = 0.45f))
+    ) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = null,
+                        tint = AcidLime,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Text(
+                        text = stringResource(R.string.export_viral_post_ready),
+                        style = MaterialTheme.typography.labelMedium,
+                        color = AcidLime,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Text(
+                    text = "${project.socialCaptions.hashtags.size} #tags",
+                    style = MaterialTheme.typography.labelSmall,
+                    color = CyanWave
+                )
+            }
+
+            Text(
+                text = postPayload.ifBlank { project.title },
+                style = MaterialTheme.typography.bodySmall,
+                color = InkPrimary,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                Button(
+                    onClick = {
+                        QuickShareCoordinator.copyToClipboard(context, "Viral Post", postPayload)
+                        copiedPost = true
+                        onCopiedFeedback("Viral caption & hashtags copied!")
+                    },
+                    modifier = Modifier
+                        .weight(1.2f)
+                        .height(44.dp)
+                        .testTag("export_copy_viral_post_button"),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 10.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = AcidLime,
+                        contentColor = ObsidianBg
+                    )
+                ) {
+                    Icon(
+                        imageVector = if (copiedPost) Icons.Rounded.Check else Icons.Rounded.ContentCopy,
+                        contentDescription = null,
+                        modifier = Modifier.size(16.dp)
+                    )
+                    Spacer(Modifier.width(5.dp))
+                    Text(
+                        text = if (copiedPost) "Copied!" else stringResource(R.string.action_copy_post_export),
+                        style = MaterialTheme.typography.labelMedium,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+
+                OutlinedButton(
+                    onClick = onGenerateAiCaptions,
+                    enabled = !isGeneratingSocialCaptions,
+                    modifier = Modifier
+                        .weight(0.8f)
+                        .height(44.dp)
+                        .testTag("export_regenerate_ai_captions_button"),
+                    shape = RoundedCornerShape(12.dp),
+                    contentPadding = PaddingValues(horizontal = 8.dp),
+                    border = BorderStroke(1.dp, CoralPulse.copy(alpha = 0.7f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = CoralPulse)
+                ) {
+                    if (isGeneratingSocialCaptions) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(15.dp),
+                            strokeWidth = 2.dp,
+                            color = CoralPulse
+                        )
+                    } else {
+                        Icon(Icons.Rounded.AutoAwesome, contentDescription = null, modifier = Modifier.size(15.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("AI Refresh", style = MaterialTheme.typography.labelSmall, maxLines = 1)
+                    }
+                }
+            }
+        }
     }
 
     Column(

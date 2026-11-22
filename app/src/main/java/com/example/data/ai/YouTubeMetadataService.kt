@@ -43,7 +43,7 @@ class YouTubeMetadataService {
             )
 
         val canonicalUrl = "https://www.youtube.com/watch?v=$videoId"
-        val fallbackThumbnail = "https://img.youtube.com/vi/$videoId/hqdefault.jpg"
+        val bestThumbnail = resolveBestThumbnailUrl(videoId)
 
         return@withContext try {
             val encoded = URLEncoder.encode(canonicalUrl, "UTF-8")
@@ -60,7 +60,7 @@ class YouTubeMetadataService {
                             url = canonicalUrl,
                             title = "YouTube Video ($videoId)",
                             authorName = "YouTube Creator",
-                            thumbnailUrl = fallbackThumbnail
+                            thumbnailUrl = bestThumbnail
                         )
                     )
                 }
@@ -68,14 +68,15 @@ class YouTubeMetadataService {
                 val json = JSONObject(body)
                 val title = json.optString("title").ifBlank { "YouTube Video ($videoId)" }
                 val author = json.optString("author_name").ifBlank { "YouTube Creator" }
-                val thumb = json.optString("thumbnail_url").ifBlank { fallbackThumbnail }
+                val oembedThumb = json.optString("thumbnail_url")
+                val finalThumb = bestThumbnail.ifBlank { oembedThumb.ifBlank { "https://img.youtube.com/vi/$videoId/hqdefault.jpg" } }
                 Result.success(
                     YouTubeVideoInfo(
                         videoId = videoId,
                         url = canonicalUrl,
                         title = title,
                         authorName = author,
-                        thumbnailUrl = thumb
+                        thumbnailUrl = finalThumb
                     )
                 )
             }
@@ -87,9 +88,25 @@ class YouTubeMetadataService {
                     url = canonicalUrl,
                     title = "YouTube Clip ($videoId)",
                     authorName = "Creator Video",
-                    thumbnailUrl = fallbackThumbnail
+                    thumbnailUrl = bestThumbnail
                 )
             )
         }
+    }
+
+    private fun resolveBestThumbnailUrl(videoId: String): String {
+        val candidates = listOf(
+            "https://img.youtube.com/vi/$videoId/maxresdefault.jpg",
+            "https://img.youtube.com/vi/$videoId/sddefault.jpg",
+            "https://img.youtube.com/vi/$videoId/hqdefault.jpg"
+        )
+        for (url in candidates) {
+            val ok = runCatching {
+                val headReq = Request.Builder().url(url).head().build()
+                client.newCall(headReq).execute().use { it.isSuccessful }
+            }.getOrDefault(false)
+            if (ok) return url
+        }
+        return candidates.last()
     }
 }

@@ -1,5 +1,6 @@
 package com.example.data.ai
 
+import android.graphics.Bitmap
 import android.util.Log
 import com.example.model.SocialCaptionBundle
 import com.example.model.SubtitleCue
@@ -8,6 +9,7 @@ import com.example.model.YouTubeVideoInfo
 import com.google.firebase.Firebase
 import com.google.firebase.ai.ai
 import com.google.firebase.ai.type.Schema
+import com.google.firebase.ai.type.content
 import com.google.firebase.ai.type.generationConfig
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.TimeoutCancellationException
@@ -61,12 +63,20 @@ class ViralClipAiService {
 
     private val socialCaptionsSchema = Schema.obj(
         properties = mapOf(
-            "viralHook" to Schema.string("Scroll-stopping opening hook"),
-            "instagramCaption" to Schema.string("Instagram Reels ready caption"),
-            "youtubeShortsCaption" to Schema.string("YouTube Shorts ready caption"),
-            "tiktokCaption" to Schema.string("TikTok punchy caption"),
-            "twitterCaption" to Schema.string("X / LinkedIn post caption"),
-            "hashtags" to Schema.array(Schema.string("Trending hashtag with #"))
+            "viralHook" to Schema.string("Primary scroll-stopping 1-line opening hook (under 90 chars)"),
+            "alternateHooks" to Schema.array(
+                items = Schema.string("Alternative punchy opening hook"),
+                description = "3 distinct scroll-stopping 3-second hook variations"
+            ),
+            "visualInsight" to Schema.string("One-sentence insight describing the key visual/story elements detected in the video and why this caption angle hooks viewers"),
+            "instagramCaption" to Schema.string("Instagram Reels caption with engaging micro-story, line breaks, and save/share CTA"),
+            "youtubeShortsCaption" to Schema.string("YouTube Shorts SEO-friendly title and punchy description ending with #Shorts"),
+            "tiktokCaption" to Schema.string("TikTok ultra-punchy curiosity caption with comment trigger"),
+            "twitterCaption" to Schema.string("X / LinkedIn high-signal short post under 260 characters"),
+            "hashtags" to Schema.array(
+                items = Schema.string("Trending or niche hashtag starting with #"),
+                description = "12 curated hashtags mixing high-reach viral tags and content-specific niche tags"
+            )
         )
     )
 
@@ -157,25 +167,62 @@ class ViralClipAiService {
     suspend fun regenerateSocialCaptions(
         projectTitle: String,
         subtitleContext: String,
-        tone: String
+        tone: String,
+        channelName: String = "",
+        clipTitles: List<String> = emptyList(),
+        overlayTexts: List<String> = emptyList(),
+        durationSec: Int = 30,
+        aspectRatioLabel: String = "9:16",
+        extraContext: String = "",
+        videoFrames: List<Bitmap> = emptyList()
     ): SocialCaptionBundle {
-        val prompt = """
-            Generate fresh, high-converting social media captions for a short-form viral video clip.
-            - Clip Title: $projectTitle
-            - Spoken / Subtitle Script: ${subtitleContext.ifBlank { projectTitle }}
-            - Tone / Vibe: $tone
-            Create a strong opening hook, platform-tailored captions for Instagram Reels, YouTube Shorts, TikTok, and X/LinkedIn, plus 8 relevant trending hashtags starting with #.
-        """.trimIndent()
+        val prompt = buildString {
+            appendLine("You are an elite viral social media strategist and short-form copywriter.")
+            if (videoFrames.isNotEmpty()) {
+                appendLine("Closely inspect the attached ${videoFrames.size} keyframe image(s) extracted from the user's video along with the timeline context below.")
+            } else {
+                appendLine("Analyze the video timeline metadata and script below to craft viral social media copy.")
+            }
+            appendLine()
+            appendLine("Video Content Context:")
+            appendLine("- Project Title: ${projectTitle.ifBlank { "Untitled Video Cut" }}")
+            if (channelName.isNotBlank()) appendLine("- Creator / Source Channel: $channelName")
+            appendLine("- Format & Length: $aspectRatioLabel · ${durationSec}s")
+            if (clipTitles.isNotEmpty()) appendLine("- Timeline Clips: ${clipTitles.joinToString(" → ")}")
+            if (overlayTexts.isNotEmpty()) appendLine("- On-Screen Text Overlays: ${overlayTexts.joinToString(" | ")}")
+            appendLine("- Spoken / Subtitle Transcript: ${subtitleContext.ifBlank { projectTitle }}")
+            appendLine("- Requested Tone / Vibe: $tone")
+            if (extraContext.isNotBlank()) appendLine("- Creator Focus / CTA Hint: $extraContext")
+            appendLine()
+            appendLine("Output Requirements:")
+            appendLine("1. Write a primary scroll-stopping 'viralHook' plus 3 distinct 'alternateHooks' (including the primary hook or fresh angles).")
+            appendLine("2. Write a 1-sentence 'visualInsight' summarizing what stands out in the video content and why this angle drives retention.")
+            appendLine("3. Craft platform-native captions (do NOT stuff raw hashtag blocks inside the caption body; keep hashtags in the dedicated array, except #Shorts for YouTube if helpful):")
+            appendLine("   - instagramCaption: High-retention Reels caption with clean spacing and a save/comment CTA.")
+            appendLine("   - youtubeShortsCaption: Search-friendly Shorts headline + crisp description.")
+            appendLine("   - tiktokCaption: Ultra-short curiosity loop or relatable comment bait.")
+            appendLine("   - twitterCaption: Punchy high-signal post under 260 characters.")
+            appendLine("4. Generate 12 high-converting 'hashtags' starting with # (mix of 4 broad viral discovery tags, 5 specific topic/visual tags matching what's in the video, and 3 community/niche tags). No spaces inside hashtags.")
+        }.trim()
+
+        val inputContent = content {
+            videoFrames.take(3).forEach { frame ->
+                if (!frame.isRecycled) {
+                    image(frame)
+                }
+            }
+            text(prompt)
+        }
 
         try {
             val response = withTimeout(60_000L) {
-                socialCaptionsModel.generateContent(prompt)
+                socialCaptionsModel.generateContent(inputContent)
             }
             val rawJson = response.text ?: throw IllegalStateException("AI returned empty captions.")
-            return parseSocialBundle(JSONObject(rawJson))
+            return parseSocialBundle(JSONObject(rawJson), generatedTone = tone)
         } catch (e: TimeoutCancellationException) {
             Log.e(TAG, "Caption regeneration timed out", e)
-            throw IllegalStateException("Caption generation timed out after 60s.", e)
+            throw IllegalStateException("Caption generation timed out after 60s. Please retry.", e)
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
@@ -302,24 +349,40 @@ class ViralClipAiService {
         return cues
     }
 
-    private fun parseSocialBundle(obj: JSONObject): SocialCaptionBundle {
+    private fun parseSocialBundle(
+        obj: JSONObject,
+        generatedTone: String = ""
+    ): SocialCaptionBundle {
         val tagsArr = obj.optJSONArray("hashtags")
-        val tags = mutableListOf<String>()
+        val tags = LinkedHashSet<String>()
         if (tagsArr != null) {
             for (i in 0 until tagsArr.length()) {
-                val raw = tagsArr.optString(i).trim()
-                if (raw.isNotEmpty()) {
+                val raw = tagsArr.optString(i).trim().replace(" ", "")
+                if (raw.isNotEmpty() && raw != "#") {
                     tags.add(if (raw.startsWith("#")) raw else "#$raw")
                 }
             }
         }
+        val hooksArr = obj.optJSONArray("alternateHooks")
+        val hooks = LinkedHashSet<String>()
+        val primaryHook = obj.optString("viralHook").trim()
+        if (primaryHook.isNotEmpty()) hooks.add(primaryHook)
+        if (hooksArr != null) {
+            for (i in 0 until hooksArr.length()) {
+                val h = hooksArr.optString(i).trim()
+                if (h.isNotEmpty()) hooks.add(h)
+            }
+        }
         return SocialCaptionBundle(
-            viralHook = obj.optString("viralHook"),
-            instagramCaption = obj.optString("instagramCaption"),
-            youtubeShortsCaption = obj.optString("youtubeShortsCaption"),
-            tiktokCaption = obj.optString("tiktokCaption"),
-            twitterCaption = obj.optString("twitterCaption"),
-            hashtags = tags
+            viralHook = primaryHook.ifBlank { hooks.firstOrNull().orEmpty() },
+            alternateHooks = hooks.take(4),
+            visualInsight = obj.optString("visualInsight").trim(),
+            generatedTone = generatedTone.ifBlank { obj.optString("generatedTone").trim() },
+            instagramCaption = obj.optString("instagramCaption").trim(),
+            youtubeShortsCaption = obj.optString("youtubeShortsCaption").trim(),
+            tiktokCaption = obj.optString("tiktokCaption").trim(),
+            twitterCaption = obj.optString("twitterCaption").trim(),
+            hashtags = tags.take(20)
         )
     }
 

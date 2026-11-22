@@ -37,10 +37,13 @@ import com.example.ui.components.NetworkModeBadge
 import com.example.ui.components.formatDurationShort
 import com.example.ui.theme.*
 import com.example.viewmodel.AnalysisUiState
+import com.example.viewmodel.CloudSyncUiState
 
 @Composable
 fun HomeCreateScreen(
     isOnline: Boolean,
+    userDisplayName: String,
+    cloudSyncState: CloudSyncUiState,
     youtubeUrl: String,
     targetDurationSec: Int,
     selectedAspectRatio: AspectRatioPreset,
@@ -54,9 +57,11 @@ fun HomeCreateScreen(
     onPickLocalVideo: () -> Unit,
     onPickLocalImage: () -> Unit,
     onOpenCandidate: (YouTubeVideoInfo, ViralClipCandidate) -> Unit,
+    onSignOut: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val clipboardManager = LocalClipboardManager.current
+    var showAccountDialog by remember { mutableStateOf(false) }
 
     LazyColumn(
         modifier = modifier
@@ -119,7 +124,54 @@ fun HomeCreateScreen(
                                 fontWeight = FontWeight.Bold
                             )
                         }
-                        NetworkModeBadge(isOnline = isOnline)
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            NetworkModeBadge(isOnline = isOnline)
+                            Surface(
+                                onClick = { showAccountDialog = true },
+                                modifier = Modifier
+                                    .defaultMinSize(minHeight = 40.dp)
+                                    .testTag("account_sync_button"),
+                                shape = RoundedCornerShape(999.dp),
+                                color = SurfaceElevated.copy(alpha = 0.9f),
+                                border = BorderStroke(
+                                    1.dp,
+                                    when (cloudSyncState) {
+                                        is CloudSyncUiState.Synced -> AcidLime.copy(alpha = 0.6f)
+                                        is CloudSyncUiState.Error -> CoralPulse.copy(alpha = 0.7f)
+                                        CloudSyncUiState.Loading -> CyanWave.copy(alpha = 0.5f)
+                                    }
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(5.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = when (cloudSyncState) {
+                                            is CloudSyncUiState.Synced -> Icons.Rounded.CloudDone
+                                            is CloudSyncUiState.Error -> Icons.Rounded.CloudOff
+                                            CloudSyncUiState.Loading -> Icons.Rounded.CloudSync
+                                        },
+                                        contentDescription = stringResource(R.string.cd_account_menu),
+                                        tint = when (cloudSyncState) {
+                                            is CloudSyncUiState.Synced -> AcidLime
+                                            is CloudSyncUiState.Error -> CoralPulse
+                                            CloudSyncUiState.Loading -> CyanWave
+                                        },
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Text(
+                                        text = userDisplayName.substringBefore(" ").take(10).ifBlank { "Account" },
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = InkPrimary
+                                    )
+                                }
+                            }
+                        }
                     }
 
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -503,6 +555,57 @@ fun HomeCreateScreen(
                 )
             }
         }
+    }
+
+    if (showAccountDialog) {
+        AlertDialog(
+            onDismissRequest = { showAccountDialog = false },
+            containerColor = SurfaceCard,
+            title = {
+                Text(
+                    text = "Creator Account & Cloud Sync",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = InkPrimary
+                )
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Text(
+                        text = "Signed in as: $userDisplayName",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = InkPrimary
+                    )
+                    Text(
+                        text = when (cloudSyncState) {
+                            is CloudSyncUiState.Synced -> "Firebase Cloud Firestore synced (${cloudSyncState.count} cloud projects)."
+                            is CloudSyncUiState.Loading -> "Syncing your studio projects with Firebase Cloud…"
+                            is CloudSyncUiState.Error -> "Offline / Sync notice: ${cloudSyncState.message}"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = InkSecondary
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showAccountDialog = false
+                        onSignOut()
+                    },
+                    modifier = Modifier.testTag("sign_out_button"),
+                    colors = ButtonDefaults.buttonColors(containerColor = CoralPulse, contentColor = OnCoral)
+                ) {
+                    Icon(Icons.Rounded.Logout, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(6.dp))
+                    Text(stringResource(R.string.action_sign_out))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAccountDialog = false }) {
+                    Text("Close", color = InkSecondary)
+                }
+            }
+        )
     }
 }
 

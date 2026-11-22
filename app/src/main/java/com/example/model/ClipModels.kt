@@ -54,11 +54,170 @@ enum class AspectRatioPreset(
     );
 
     val aspectRatio: Float get() = widthRatio / heightRatio
+
+    fun dimensionsFor(resolution: ExportResolution): Pair<Int, Int> {
+        val shortSide = resolution.shortSidePx
+        val rawW: Int
+        val rawH: Int
+        if (widthRatio >= heightRatio) {
+            rawH = shortSide
+            rawW = kotlin.math.round(shortSide * (widthRatio / heightRatio)).toInt()
+        } else {
+            rawW = shortSide
+            rawH = kotlin.math.round(shortSide * (heightRatio / widthRatio)).toInt()
+        }
+        val maxLongSide = when (resolution) {
+            ExportResolution.RES_720P -> 1280
+            ExportResolution.RES_1080P -> 1920
+            ExportResolution.RES_2K -> 2560
+            ExportResolution.RES_4K -> 3840
+        }
+        val scaleDown = if (maxOf(rawW, rawH) > maxLongSide) {
+            maxLongSide.toFloat() / maxOf(rawW, rawH).toFloat()
+        } else 1f
+        val w = ((rawW * scaleDown).toInt() / 16 * 16).coerceAtLeast(320)
+        val h = ((rawH * scaleDown).toInt() / 16 * 16).coerceAtLeast(320)
+        return w to h
+    }
 }
 
-enum class ExportQuality(val label: String, val bitrateBps: Int) {
-    HD_720P("720p HD", 4_500_000),
-    FULL_HD_1080P("1080p Full HD", 8_000_000)
+enum class ExportResolution(
+    val label: String,
+    val shortLabel: String,
+    val shortSidePx: Int,
+    val tag: String
+) {
+    RES_720P("720p HD", "720p", 720, "Compact"),
+    RES_1080P("1080p Full HD", "1080p", 1080, "Social HD"),
+    RES_2K("2K QHD", "2K", 1440, "Crisp 2K"),
+    RES_4K("4K UHD", "4K", 2160, "Ultra HD")
+}
+
+enum class ExportBitrateTier(
+    val label: String,
+    val subtitle: String
+) {
+    STANDARD("Standard", "Fast Upload"),
+    HIGH("High", "Social Crisp"),
+    MASTER("Master", "Pro Master")
+}
+
+fun resolveExportBitrateMbps(
+    resolution: ExportResolution,
+    tier: ExportBitrateTier,
+    fps: Int
+): Int {
+    val isHighFps = fps >= 60
+    return when (resolution) {
+        ExportResolution.RES_720P -> when (tier) {
+            ExportBitrateTier.STANDARD -> if (isHighFps) 6 else 5
+            ExportBitrateTier.HIGH -> if (isHighFps) 10 else 8
+            ExportBitrateTier.MASTER -> if (isHighFps) 14 else 12
+        }
+        ExportResolution.RES_1080P -> when (tier) {
+            ExportBitrateTier.STANDARD -> if (isHighFps) 12 else 10
+            ExportBitrateTier.HIGH -> if (isHighFps) 18 else 16
+            ExportBitrateTier.MASTER -> if (isHighFps) 24 else 22
+        }
+        ExportResolution.RES_2K -> when (tier) {
+            ExportBitrateTier.STANDARD -> if (isHighFps) 22 else 18
+            ExportBitrateTier.HIGH -> if (isHighFps) 30 else 26
+            ExportBitrateTier.MASTER -> if (isHighFps) 38 else 34
+        }
+        ExportResolution.RES_4K -> when (tier) {
+            ExportBitrateTier.STANDARD -> if (isHighFps) 34 else 28
+            ExportBitrateTier.HIGH -> if (isHighFps) 44 else 38
+            ExportBitrateTier.MASTER -> if (isHighFps) 50 else 48
+        }
+    }
+}
+
+enum class SocialPlatformExportPreset(
+    val label: String,
+    val shortLabel: String,
+    val tagline: String,
+    val aspectRatio: AspectRatioPreset,
+    val resolution: ExportResolution,
+    val bitrateTier: ExportBitrateTier,
+    val fps: Int,
+    val proClarity: Boolean
+) {
+    INSTAGRAM_REELS(
+        label = "Instagram Reels",
+        shortLabel = "Reels",
+        tagline = "9:16 · 1080p · 60fps · High",
+        aspectRatio = AspectRatioPreset.RATIO_9_16,
+        resolution = ExportResolution.RES_1080P,
+        bitrateTier = ExportBitrateTier.HIGH,
+        fps = 60,
+        proClarity = true
+    ),
+    YOUTUBE_SHORTS(
+        label = "YouTube Shorts",
+        shortLabel = "Shorts",
+        tagline = "9:16 · 1080p · 60fps · Master",
+        aspectRatio = AspectRatioPreset.RATIO_9_16,
+        resolution = ExportResolution.RES_1080P,
+        bitrateTier = ExportBitrateTier.MASTER,
+        fps = 60,
+        proClarity = true
+    ),
+    TIKTOK(
+        label = "TikTok",
+        shortLabel = "TikTok",
+        tagline = "9:16 · 1080p · 30fps · High",
+        aspectRatio = AspectRatioPreset.RATIO_9_16,
+        resolution = ExportResolution.RES_1080P,
+        bitrateTier = ExportBitrateTier.HIGH,
+        fps = 30,
+        proClarity = true
+    ),
+    WHATSAPP(
+        label = "WhatsApp Status",
+        shortLabel = "WhatsApp",
+        tagline = "9:16 · 720p · 30fps · Standard",
+        aspectRatio = AspectRatioPreset.RATIO_9_16,
+        resolution = ExportResolution.RES_720P,
+        bitrateTier = ExportBitrateTier.STANDARD,
+        fps = 30,
+        proClarity = true
+    ),
+    YOUTUBE_4K(
+        label = "YouTube 4K",
+        shortLabel = "YT 4K",
+        tagline = "16:9 · 4K UHD · 60fps · Master",
+        aspectRatio = AspectRatioPreset.RATIO_16_9,
+        resolution = ExportResolution.RES_4K,
+        bitrateTier = ExportBitrateTier.MASTER,
+        fps = 60,
+        proClarity = true
+    )
+}
+
+enum class ExportQuality(
+    val label: String,
+    val specBadge: String,
+    val bitrateBps: Int,
+    val fps: Int
+) {
+    HD_720P(
+        label = "720p HD",
+        specBadge = "30fps · 8 Mbps",
+        bitrateBps = 8_000_000,
+        fps = 30
+    ),
+    FULL_HD_1080P(
+        label = "1080p Full HD",
+        specBadge = "30fps · 16 Mbps",
+        bitrateBps = 16_000_000,
+        fps = 30
+    ),
+    PRO_IPHONE_MASTER(
+        label = "iPhone Pro Master",
+        specBadge = "60fps · 22 Mbps",
+        bitrateBps = 22_000_000,
+        fps = 60
+    )
 }
 
 enum class VideoFilterPreset(
@@ -168,15 +327,19 @@ enum class VideoEffectPreset(val displayName: String, val badge: String) {
     KINETIC_SHAKE("Impact Shake", "Hype")
 }
 
-enum class TransitionPreset(val displayName: String, val shortLabel: String) {
-    NONE("Cut", "Cut"),
-    CROSSFADE("Crossfade", "Fade"),
-    SLIDE_LEFT("Slide Left", "Slide"),
-    SLIDE_UP("Slide Up", "Up"),
-    ZOOM_IN("Zoom In", "Zoom"),
-    FLASH_WHITE("Flash Cut", "Flash"),
-    GLITCH_CUT("Glitch Cut", "Glitch"),
-    WIPE_RIGHT("Cinema Wipe", "Wipe")
+enum class TransitionPreset(
+    val displayName: String,
+    val shortLabel: String,
+    val description: String
+) {
+    NONE("Cut", "Cut", "Instant hard cut"),
+    CROSSFADE("Crossfade", "Fade", "Smooth opacity blend"),
+    SLIDE_LEFT("Slide Left", "Slide", "Horizontal push sweep"),
+    SLIDE_UP("Slide Up", "Up", "Vertical upward push"),
+    ZOOM_IN("Zoom In", "Zoom", "Dynamic punch-in zoom"),
+    FLASH_WHITE("Flash Cut", "Flash", "Bright strobe flash"),
+    GLITCH_CUT("Glitch Cut", "Glitch", "Digital RGB snap"),
+    WIPE_RIGHT("Cinema Wipe", "Wipe", "Left-to-right reveal")
 }
 
 enum class SubtitleStylePreset(
@@ -253,20 +416,96 @@ data class TimelineClipItem(
     val viralScore: Int = 92,
     val hookReason: String = "",
     val youtubeStartLabel: String = "00:00",
-    val youtubeEndLabel: String = "00:30"
+    val youtubeEndLabel: String = "00:30",
+    val transitionAfter: TransitionPreset? = null,
+    val transitionDurationSec: Float? = null
 ) {
     val effectiveDurationMs: Long
         get() = (trimEndMs - trimStartMs).coerceAtLeast(3_000L)
 }
 
+enum class ViralCaptionTone(
+    val label: String,
+    val hint: String
+) {
+    VIRAL_PUNCHY("Viral Punchy", "High-energy short hook + curiosity"),
+    HINGLISH_DESI("Hinglish Desi", "Relatable Hindi-English creator vibe"),
+    STORYTELLING("Storytelling", "Mini narrative with emotional payoff"),
+    CURIOSITY_HOOK("Curiosity Hook", "Open loop that drives watch-time & comments"),
+    EDUCATIONAL("Value Tips", "Actionable takeaway & save-worthy format"),
+    BOLD_CTA("Bold CTA", "Direct debate question & share trigger")
+}
+
+enum class SocialPlatformTab(
+    val label: String,
+    val shortLabel: String,
+    val recommendedMaxChars: Int
+) {
+    INSTAGRAM("Instagram Reels", "Reels", 2200),
+    YOUTUBE("YT Shorts", "Shorts", 500),
+    TIKTOK("TikTok", "TikTok", 400),
+    TWITTER("X / LinkedIn", "X / Post", 280);
+
+    fun captionFrom(bundle: SocialCaptionBundle): String = when (this) {
+        INSTAGRAM -> bundle.instagramCaption
+        YOUTUBE -> bundle.youtubeShortsCaption
+        TIKTOK -> bundle.tiktokCaption
+        TWITTER -> bundle.twitterCaption
+    }
+
+    fun updateBundle(bundle: SocialCaptionBundle, updatedCaption: String): SocialCaptionBundle = when (this) {
+        INSTAGRAM -> bundle.copy(instagramCaption = updatedCaption)
+        YOUTUBE -> bundle.copy(youtubeShortsCaption = updatedCaption)
+        TIKTOK -> bundle.copy(tiktokCaption = updatedCaption)
+        TWITTER -> bundle.copy(twitterCaption = updatedCaption)
+    }
+}
+
 data class SocialCaptionBundle(
     val viralHook: String = "",
+    val alternateHooks: List<String> = emptyList(),
+    val visualInsight: String = "",
+    val generatedTone: String = "",
     val instagramCaption: String = "",
     val youtubeShortsCaption: String = "",
     val tiktokCaption: String = "",
     val twitterCaption: String = "",
     val hashtags: List<String> = emptyList()
-)
+) {
+    fun buildFullPost(
+        platform: SocialPlatformTab,
+        fallbackTitle: String,
+        selectedHashtags: List<String> = hashtags
+    ): String {
+        val body = platform.captionFrom(this).ifBlank { fallbackTitle }
+        return buildString {
+            if (viralHook.isNotBlank()) {
+                appendLine(viralHook.trim())
+                appendLine()
+            }
+            append(body.trim())
+            if (selectedHashtags.isNotEmpty()) {
+                appendLine()
+                appendLine()
+                append(selectedHashtags.joinToString(" "))
+            }
+        }.trim()
+    }
+
+    fun buildCaptionOnly(
+        platform: SocialPlatformTab,
+        fallbackTitle: String
+    ): String {
+        val body = platform.captionFrom(this).ifBlank { fallbackTitle }
+        return buildString {
+            if (viralHook.isNotBlank()) {
+                appendLine(viralHook.trim())
+                appendLine()
+            }
+            append(body.trim())
+        }.trim()
+    }
+}
 
 data class TtsSettings(
     val enabled: Boolean = false,
@@ -307,7 +546,11 @@ data class ClipProject(
     val channelName: String = "",
     val coverThumbnailUrl: String = "",
     val aspectRatio: AspectRatioPreset = AspectRatioPreset.RATIO_19_6,
-    val exportQuality: ExportQuality = ExportQuality.FULL_HD_1080P,
+    val exportQuality: ExportQuality = ExportQuality.PRO_IPHONE_MASTER,
+    val exportResolution: ExportResolution = ExportResolution.RES_1080P,
+    val exportBitrateTier: ExportBitrateTier = ExportBitrateTier.MASTER,
+    val exportFps: Int = 60,
+    val proClarityEnabled: Boolean = true,
     val targetLengthSec: Int = 60,
     val clips: List<TimelineClipItem> = emptyList(),
     val autoCaptionsEnabled: Boolean = true,
@@ -336,4 +579,43 @@ data class ClipProject(
             val clipSum = clips.sumOf { it.effectiveDurationMs }
             return if (clipSum > 0L) clipSum else targetLengthSec * 1000L
         }
+
+    fun resolvedExportDimensions(): Pair<Int, Int> = aspectRatio.dimensionsFor(exportResolution)
+
+    fun resolvedExportBitrateMbps(): Int = resolveExportBitrateMbps(exportResolution, exportBitrateTier, exportFps)
+
+    fun resolvedExportBitrateBps(): Int = resolvedExportBitrateMbps() * 1_000_000
+
+    fun estimatedExportSizeMb(): Double {
+        val totalBitsPerSec = resolvedExportBitrateBps().toDouble() + 192_000.0
+        val seconds = (totalDurationMs / 1000.0).coerceAtLeast(1.0)
+        return (totalBitsPerSec * seconds) / (8.0 * 1024.0 * 1024.0)
+    }
+
+    fun matchingSocialPreset(): SocialPlatformExportPreset? {
+        return SocialPlatformExportPreset.entries.firstOrNull { preset ->
+            preset.aspectRatio == aspectRatio &&
+                preset.resolution == exportResolution &&
+                preset.bitrateTier == exportBitrateTier &&
+                preset.fps == exportFps
+        }
+    }
+
+    fun resolvedTransitionAfter(clipIndex: Int): TransitionPreset {
+        return clips.getOrNull(clipIndex)?.transitionAfter ?: transitionPreset
+    }
+
+    fun resolvedTransitionDurationSec(clipIndex: Int): Float {
+        return (clips.getOrNull(clipIndex)?.transitionDurationSec ?: transitionDurationSec)
+            .coerceIn(0.2f, 2.0f)
+    }
+
+    fun spliceBoundaryMs(clipIndex: Int): Long {
+        if (clips.isEmpty() || clipIndex !in clips.indices) return 0L
+        var acc = 0L
+        for (i in 0..clipIndex) {
+            acc += clips[i].effectiveDurationMs
+        }
+        return acc.coerceAtMost(totalDurationMs)
+    }
 }

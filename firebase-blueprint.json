@@ -1,0 +1,257 @@
+{
+  "entities": {
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Authenticated ClipPulse creator profile scoped strictly to the owning Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID matching the document path ID."
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Creator display name shown in the studio header (1-80 characters)."
+        },
+        "photoUrl": {
+          "type": "string",
+          "description": "Optional Google profile photo URL (max 500 characters)."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable creation timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last profile sync timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": ["userId", "displayName", "createdAt", "updatedAt"]
+    },
+    "CloudClipProject": {
+      "title": "CloudClipProject",
+      "description": "Cloud-synced ClipPulse video project including aspect ratio, master quality settings, timeline clips, subtitles, overlays, filters, effects, transitions, TTS voiceover, and social captions.",
+      "type": "object",
+      "properties": {
+        "userId": {
+          "type": "string",
+          "description": "Owner Firebase Auth UID matching the parent /users/{userId} path."
+        },
+        "title": {
+          "type": "string",
+          "description": "Project title (1-120 characters)."
+        },
+        "youtubeUrl": {
+          "type": "string",
+          "description": "Optional canonical YouTube source URL (max 500 characters)."
+        },
+        "youtubeVideoId": {
+          "type": "string",
+          "description": "Optional YouTube 11-character video ID (max 64 characters)."
+        },
+        "channelName": {
+          "type": "string",
+          "description": "Optional source channel name (max 120 characters)."
+        },
+        "coverThumbnailUrl": {
+          "type": "string",
+          "description": "Optional HD thumbnail URL (max 500 characters)."
+        },
+        "aspectRatio": {
+          "type": "string",
+          "enum": ["RATIO_19_6", "RATIO_9_16", "RATIO_16_9", "RATIO_1_1"],
+          "description": "Selected export aspect ratio preset."
+        },
+        "exportQuality": {
+          "type": "string",
+          "enum": ["HD_720P", "FULL_HD_1080P", "PRO_IPHONE_MASTER"],
+          "description": "Legacy export quality preset kept for backward compatibility."
+        },
+        "exportResolution": {
+          "type": "string",
+          "enum": ["RES_720P", "RES_1080P", "RES_2K", "RES_4K"],
+          "description": "Selected export resolution tier (720p, 1080p, 2K, or 4K UHD)."
+        },
+        "exportBitrateTier": {
+          "type": "string",
+          "enum": ["STANDARD", "HIGH", "MASTER"],
+          "description": "Selected bitrate tier (Standard, High, or Master)."
+        },
+        "exportFps": {
+          "type": "integer",
+          "enum": [30, 60],
+          "description": "Selected export frame rate (30 or 60 fps)."
+        },
+        "proClarityEnabled": {
+          "type": "boolean",
+          "description": "Whether iPhone-grade Smart Clarity & Rec.709 color mastering is enabled."
+        },
+        "targetLengthSec": {
+          "type": "integer",
+          "description": "Target project length in seconds (15 to 180)."
+        },
+        "autoCaptionsEnabled": {
+          "type": "boolean",
+          "description": "Whether automatic synced subtitles are burned into the video."
+        },
+        "subtitleStyle": {
+          "type": "string",
+          "enum": ["VIRAL_POP", "NEON_GLOW", "PILL_BOX", "YELLOW_BOLD", "CINEMA_BAR"],
+          "description": "Subtitle visual theme."
+        },
+        "subtitleFontSizeSp": {
+          "type": "number",
+          "description": "Subtitle size in SP (12 to 40)."
+        },
+        "subtitleYFraction": {
+          "type": "number",
+          "description": "Vertical normalized position of subtitles (0.05 to 0.95)."
+        },
+        "filterPreset": {
+          "type": "string",
+          "enum": [
+            "ORIGINAL",
+            "CINEMATIC_TEAL",
+            "VIVID_VIRAL",
+            "WARM_SUNSET",
+            "NOIR_BW",
+            "CYBER_NEON",
+            "VINTAGE_FILM",
+            "COOL_CRISP",
+            "GOLDEN_HOUR"
+          ],
+          "description": "Color grading filter preset."
+        },
+        "filterIntensity": {
+          "type": "number",
+          "description": "Filter blend intensity (0.0 to 1.0)."
+        },
+        "effectPreset": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "ZOOM_PULSE",
+            "VIGNETTE",
+            "RGB_GLITCH",
+            "RETRO_VHS",
+            "GLOW_BLOOM",
+            "KINETIC_SHAKE"
+          ],
+          "description": "Visual effect overlay preset."
+        },
+        "effectIntensity": {
+          "type": "number",
+          "description": "Effect intensity (0.0 to 1.0)."
+        },
+        "transitionPreset": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "CROSSFADE",
+            "SLIDE_LEFT",
+            "SLIDE_UP",
+            "ZOOM_IN",
+            "FLASH_WHITE",
+            "GLITCH_CUT",
+            "WIPE_RIGHT"
+          ],
+          "description": "Inter-clip transition preset."
+        },
+        "transitionDurationSec": {
+          "type": "number",
+          "description": "Transition duration in seconds (0.1 to 3.0)."
+        },
+        "musicPreset": {
+          "type": "string",
+          "enum": [
+            "NONE",
+            "PHONK_DRIVE",
+            "LOFI_CHILL",
+            "CINEMATIC_PULSE",
+            "INDIE_UPBEAT",
+            "CYBER_SYNTH",
+            "CUSTOM_AUDIO"
+          ],
+          "description": "Background music preset."
+        },
+        "customMusicName": {
+          "type": "string",
+          "description": "Optional custom device audio display name (max 120 characters)."
+        },
+        "musicVolume": {
+          "type": "number",
+          "description": "Background music gain (0.0 to 1.0)."
+        },
+        "clips": {
+          "type": "array",
+          "description": "Bounded native list of up to 30 timeline clip maps."
+        },
+        "subtitles": {
+          "type": "array",
+          "description": "Bounded native list of up to 150 timed subtitle cue maps."
+        },
+        "textOverlays": {
+          "type": "array",
+          "description": "Bounded native list of up to 30 custom text overlay maps."
+        },
+        "ttsSettings": {
+          "type": "object",
+          "description": "Native map of offline TTS voiceover settings."
+        },
+        "socialCaptions": {
+          "type": "object",
+          "description": "Native map of platform-ready social captions and hashtags."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Immutable creation timestamp written via FieldValue.serverTimestamp()."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Last modification timestamp written via FieldValue.serverTimestamp()."
+        }
+      },
+      "required": [
+        "userId",
+        "title",
+        "aspectRatio",
+        "exportQuality",
+        "proClarityEnabled",
+        "targetLengthSec",
+        "autoCaptionsEnabled",
+        "subtitleStyle",
+        "subtitleFontSizeSp",
+        "subtitleYFraction",
+        "filterPreset",
+        "filterIntensity",
+        "effectPreset",
+        "effectIntensity",
+        "transitionPreset",
+        "transitionDurationSec",
+        "musicPreset",
+        "musicVolume",
+        "clips",
+        "subtitles",
+        "textOverlays",
+        "ttsSettings",
+        "socialCaptions",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "Owner-only creator profile metadata."
+    },
+    "/users/{userId}/projects/{projectId}": {
+      "schema": { "$ref": "#/entities/CloudClipProject" },
+      "description": "Owner-only cloud-synced video editing projects."
+    }
+  }
+}

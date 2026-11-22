@@ -1,0 +1,184 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global default-deny safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Global Hardened Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isOptionalBoundedString(data, field, maxLen) {
+      return !(field in data) || data[field] == null || (data[field] is string && data[field].size() <= maxLen);
+    }
+
+    // --- Validation Blueprints (Anti-Update-Gap) ---
+    function isValidUserProfile(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 80 &&
+             isOptionalBoundedString(data, 'photoUrl', 500);
+    }
+
+    function isValidProject(data) {
+      return data.userId is string && data.userId.size() >= 1 && data.userId.size() <= 128 &&
+             data.userId == request.auth.uid &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 120 &&
+             isOptionalBoundedString(data, 'youtubeUrl', 500) &&
+             isOptionalBoundedString(data, 'youtubeVideoId', 64) &&
+             isOptionalBoundedString(data, 'channelName', 120) &&
+             isOptionalBoundedString(data, 'coverThumbnailUrl', 500) &&
+             isOptionalBoundedString(data, 'customMusicName', 120) &&
+             data.aspectRatio in ['RATIO_19_6', 'RATIO_9_16', 'RATIO_16_9', 'RATIO_1_1'] &&
+             data.exportQuality in ['HD_720P', 'FULL_HD_1080P', 'PRO_IPHONE_MASTER'] &&
+             (!('exportResolution' in data) || data.exportResolution in ['RES_720P', 'RES_1080P', 'RES_2K', 'RES_4K']) &&
+             (!('exportBitrateTier' in data) || data.exportBitrateTier in ['STANDARD', 'HIGH', 'MASTER']) &&
+             (!('exportFps' in data) || (data.exportFps is int && data.exportFps in [30, 60])) &&
+             data.proClarityEnabled is bool &&
+             data.targetLengthSec is int && data.targetLengthSec >= 15 && data.targetLengthSec <= 180 &&
+             data.autoCaptionsEnabled is bool &&
+             data.subtitleStyle in ['VIRAL_POP', 'NEON_GLOW', 'PILL_BOX', 'YELLOW_BOLD', 'CINEMA_BAR'] &&
+             data.subtitleFontSizeSp is number && data.subtitleFontSizeSp >= 12 && data.subtitleFontSizeSp <= 40 &&
+             data.subtitleYFraction is number && data.subtitleYFraction >= 0.05 && data.subtitleYFraction <= 0.95 &&
+             data.filterPreset in [
+               'ORIGINAL', 'CINEMATIC_TEAL', 'VIVID_VIRAL', 'WARM_SUNSET',
+               'NOIR_BW', 'CYBER_NEON', 'VINTAGE_FILM', 'COOL_CRISP', 'GOLDEN_HOUR'
+             ] &&
+             data.filterIntensity is number && data.filterIntensity >= 0 && data.filterIntensity <= 1 &&
+             data.effectPreset in [
+               'NONE', 'ZOOM_PULSE', 'VIGNETTE', 'RGB_GLITCH',
+               'RETRO_VHS', 'GLOW_BLOOM', 'KINETIC_SHAKE'
+             ] &&
+             data.effectIntensity is number && data.effectIntensity >= 0 && data.effectIntensity <= 1 &&
+             data.transitionPreset in [
+               'NONE', 'CROSSFADE', 'SLIDE_LEFT', 'SLIDE_UP',
+               'ZOOM_IN', 'FLASH_WHITE', 'GLITCH_CUT', 'WIPE_RIGHT'
+             ] &&
+             data.transitionDurationSec is number && data.transitionDurationSec >= 0.1 && data.transitionDurationSec <= 3.0 &&
+             data.musicPreset in [
+               'NONE', 'PHONK_DRIVE', 'LOFI_CHILL', 'CINEMATIC_PULSE',
+               'INDIE_UPBEAT', 'CYBER_SYNTH', 'CUSTOM_AUDIO'
+             ] &&
+             data.musicVolume is number && data.musicVolume >= 0 && data.musicVolume <= 1 &&
+             data.clips is list && data.clips.size() <= 30 &&
+             (data.clips.size() == 0 || data.clips[0] is map) &&
+             data.subtitles is list && data.subtitles.size() <= 150 &&
+             (data.subtitles.size() == 0 || data.subtitles[0] is map) &&
+             data.textOverlays is list && data.textOverlays.size() <= 30 &&
+             (data.textOverlays.size() == 0 || data.textOverlays[0] is map) &&
+             data.ttsSettings is map &&
+             data.socialCaptions is map;
+    }
+
+    // --- Creator Profile Collection (/users/{userId}) ---
+    match /users/{userId} {
+      allow get: if isSignedIn() && isValidId(userId) && isOwner(userId);
+      allow list: if false;
+
+      allow create: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isOwner(userId) &&
+                       incoming().userId == request.auth.uid &&
+                       incoming().keys().hasAll(['userId', 'displayName', 'createdAt', 'updatedAt']) &&
+                       incoming().keys().hasOnly(['userId', 'displayName', 'photoUrl', 'createdAt', 'updatedAt']) &&
+                       incoming().createdAt is timestamp &&
+                       incoming().createdAt <= request.time &&
+                       incoming().updatedAt is timestamp &&
+                       incoming().updatedAt <= request.time &&
+                       isValidUserProfile(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(userId) &&
+                       isValidUserProfile(incoming()) &&
+                       isOwner(userId) &&
+                       incoming().userId == existing().userId &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().updatedAt is timestamp &&
+                       incoming().updatedAt <= request.time &&
+                       incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'photoUrl', 'updatedAt']);
+
+      allow delete: if isSignedIn() && isValidId(userId) && isOwner(userId);
+
+      // --- Cloud-Synced Video Projects (/users/{userId}/projects/{projectId}) ---
+      match /projects/{projectId} {
+        allow list: if isSignedIn() && isOwner(userId);
+        allow get: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isOwner(userId);
+
+        allow create: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(projectId) &&
+                         isOwner(userId) &&
+                         incoming().userId == request.auth.uid &&
+                         incoming().keys().hasAll([
+                           'userId', 'title', 'aspectRatio', 'exportQuality', 'proClarityEnabled',
+                           'targetLengthSec', 'autoCaptionsEnabled', 'subtitleStyle',
+                           'subtitleFontSizeSp', 'subtitleYFraction', 'filterPreset',
+                           'filterIntensity', 'effectPreset', 'effectIntensity',
+                           'transitionPreset', 'transitionDurationSec', 'musicPreset',
+                           'musicVolume', 'clips', 'subtitles', 'textOverlays',
+                           'ttsSettings', 'socialCaptions', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'userId', 'title', 'youtubeUrl', 'youtubeVideoId', 'channelName',
+                           'coverThumbnailUrl', 'aspectRatio', 'exportQuality',
+                           'exportResolution', 'exportBitrateTier', 'exportFps', 'proClarityEnabled',
+                           'targetLengthSec', 'autoCaptionsEnabled', 'subtitleStyle',
+                           'subtitleFontSizeSp', 'subtitleYFraction', 'filterPreset',
+                           'filterIntensity', 'effectPreset', 'effectIntensity',
+                           'transitionPreset', 'transitionDurationSec', 'musicPreset',
+                           'customMusicName', 'musicVolume', 'clips', 'subtitles',
+                           'textOverlays', 'ttsSettings', 'socialCaptions', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().createdAt is timestamp &&
+                         incoming().createdAt <= request.time &&
+                         incoming().updatedAt is timestamp &&
+                         incoming().updatedAt <= request.time &&
+                         isValidProject(incoming());
+
+        allow update: if isSignedIn() &&
+                         isValidId(userId) &&
+                         isValidId(projectId) &&
+                         isValidProject(incoming()) &&
+                         isOwner(userId) &&
+                         incoming().userId == existing().userId &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().updatedAt is timestamp &&
+                         incoming().updatedAt <= request.time &&
+                         incoming().diff(existing()).affectedKeys().hasOnly([
+                           'title', 'youtubeUrl', 'youtubeVideoId', 'channelName',
+                           'coverThumbnailUrl', 'aspectRatio', 'exportQuality',
+                           'exportResolution', 'exportBitrateTier', 'exportFps', 'proClarityEnabled',
+                           'targetLengthSec', 'autoCaptionsEnabled', 'subtitleStyle',
+                           'subtitleFontSizeSp', 'subtitleYFraction', 'filterPreset',
+                           'filterIntensity', 'effectPreset', 'effectIntensity',
+                           'transitionPreset', 'transitionDurationSec', 'musicPreset',
+                           'customMusicName', 'musicVolume', 'clips', 'subtitles',
+                           'textOverlays', 'ttsSettings', 'socialCaptions', 'updatedAt'
+                         ]);
+
+        allow delete: if isSignedIn() && isValidId(userId) && isValidId(projectId) && isOwner(userId);
+      }
+    }
+  }
+}
